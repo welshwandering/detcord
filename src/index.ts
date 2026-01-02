@@ -45,9 +45,7 @@ export function init(): void {
 
   // Check if we're on Discord (strict hostname check to prevent spoofing)
   const hostname = window.location.hostname;
-  const isDiscord =
-    hostname === 'discord.com' ||
-    hostname.endsWith('.discord.com');
+  const isDiscord = hostname === 'discord.com' || hostname.endsWith('.discord.com');
   if (!isDiscord) {
     console.warn('[Detcord] Not on Discord');
     return;
