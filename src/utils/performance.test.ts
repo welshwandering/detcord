@@ -456,13 +456,14 @@ describe('performance utilities', () => {
       let observerCallback: MutationCallback = () => {};
       const originalMutationObserver = globalThis.MutationObserver;
 
-      globalThis.MutationObserver = vi.fn().mockImplementation((cb: MutationCallback) => {
-        observerCallback = cb;
-        return {
-          observe: vi.fn(),
-          disconnect: vi.fn(),
-        };
-      }) as unknown as typeof MutationObserver;
+      class MockMutationObserver {
+        constructor(cb: MutationCallback) {
+          observerCallback = cb;
+        }
+        observe = vi.fn();
+        disconnect = vi.fn();
+      }
+      globalThis.MutationObserver = MockMutationObserver as unknown as typeof MutationObserver;
 
       createOptimizedObserver(target, {
         callback,
@@ -490,10 +491,11 @@ describe('performance utilities', () => {
       const disconnectSpy = vi.fn();
       const originalMutationObserver = globalThis.MutationObserver;
 
-      globalThis.MutationObserver = vi.fn().mockImplementation(() => ({
-        observe: vi.fn(),
-        disconnect: disconnectSpy,
-      })) as unknown as typeof MutationObserver;
+      class MockMutationObserver {
+        observe = vi.fn();
+        disconnect = disconnectSpy;
+      }
+      globalThis.MutationObserver = MockMutationObserver as unknown as typeof MutationObserver;
 
       const observer = createOptimizedObserver(target, {
         callback,
@@ -515,13 +517,14 @@ describe('performance utilities', () => {
       let observerCallback: MutationCallback = () => {};
       const originalMutationObserver = globalThis.MutationObserver;
 
-      globalThis.MutationObserver = vi.fn().mockImplementation((cb: MutationCallback) => {
-        observerCallback = cb;
-        return {
-          observe: vi.fn(),
-          disconnect: vi.fn(),
-        };
-      }) as unknown as typeof MutationObserver;
+      class MockMutationObserver {
+        constructor(cb: MutationCallback) {
+          observerCallback = cb;
+        }
+        observe = vi.fn();
+        disconnect = vi.fn();
+      }
+      globalThis.MutationObserver = MockMutationObserver as unknown as typeof MutationObserver;
 
       createOptimizedObserver(target, {
         callback,
