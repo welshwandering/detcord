@@ -1,6 +1,6 @@
 {
 	"name": "detcord",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"description": "Bulk delete your own Discord messages - Fast, secure, privacy-focused",
 	"author": "Alex Howells <alex@welshwandering.com> (https://welshwandering.com)",
 	"license": "MIT",

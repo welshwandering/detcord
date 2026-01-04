@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-01-04
+
+### Changed
+
+- Update @biomejs/biome from 1.9.4 to 2.3.11 with config migration
+- Update vite from 6.4.1 to 7.3.0
+- Update vitest from 3.x to 4.x with coverage threshold adjustments
+- Update jsdom from 25.0.1 to 27.4.0
+- Update @commitlint/cli from 19.8.1 to 20.3.0
+- Update @types/node from 22.19.3 to 25.0.3
+
+### Fixed
+
+- Address CodeQL security scanning issues
+- Remove ts-prune to resolve yaml version conflict
+
+### Added
+
+- Dependabot configuration for automated dependency updates
+
 ## [1.0.0] - 2026-01-02
 
 ### Added
