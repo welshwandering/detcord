@@ -7,7 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { VERSION, destroy, init } from './index';
+import { destroy, init, VERSION } from './index';
 
 describe('index module', () => {
   const originalLocation = window.location;

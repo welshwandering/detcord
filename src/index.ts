@@ -18,13 +18,12 @@ declare const __DEV__: boolean;
 
 // Re-export core modules
 export * from './core';
-
-// Re-export utility modules
-export * from './utils';
+export type { DetcordUIOptions } from './ui';
 
 // Re-export UI modules
 export { DetcordUI } from './ui';
-export type { DetcordUIOptions } from './ui';
+// Re-export utility modules
+export * from './utils';
 
 // Version information
 export const VERSION = '1.0.0';

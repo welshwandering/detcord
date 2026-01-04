@@ -2,31 +2,29 @@
  * Core modules for Detcord
  */
 
-// Types
-export * from './types';
-
-// Token extraction
-export {
-  getToken,
-  getTokenFromLocalStorage,
-  getTokenFromWebpack,
-  getAuthorId,
-  getGuildIdFromUrl,
-  getChannelIdFromUrl,
-} from './token';
-
-// API client
-export { DiscordApiClient } from './discord-api';
-
-// Deletion engine
-export { DeletionEngine } from './deletion-engine';
 export type {
-  DiscordMessage,
-  SearchResponse,
-  RateLimitInfo,
-  DiscordApiClient as IDiscordApiClient,
+  DeletionEngineCallbacks,
   DeletionEngineOptions,
   DeletionEngineState,
   DeletionEngineStats,
-  DeletionEngineCallbacks,
+  DiscordApiClient as IDiscordApiClient,
+  DiscordMessage,
+  RateLimitInfo,
+  SearchResponse,
 } from './deletion-engine';
+// Deletion engine
+export { DeletionEngine } from './deletion-engine';
+
+// API client
+export { DiscordApiClient } from './discord-api';
+// Token extraction
+export {
+  getAuthorId,
+  getChannelIdFromUrl,
+  getGuildIdFromUrl,
+  getToken,
+  getTokenFromLocalStorage,
+  getTokenFromWebpack,
+} from './token';
+// Types
+export * from './types';

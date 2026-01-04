@@ -1,4 +1,4 @@
-import { type Plugin, defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 
 const userscriptBanner = `// ==UserScript==
 // @name            Detcord

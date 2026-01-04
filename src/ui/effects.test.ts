@@ -4,11 +4,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  STATUS_MESSAGES,
   createConfetti,
   createStatusRotator,
   flashElement,
   runCountdownSequence,
+  STATUS_MESSAGES,
   shakeElement,
 } from './effects';
 

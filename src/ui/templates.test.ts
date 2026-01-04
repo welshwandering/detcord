@@ -5,8 +5,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   BUTTON_TEMPLATE,
-  ICONS,
-  WINDOW_TEMPLATE,
   createConfettiContainer,
   createCountdownOverlay,
   createElement,
@@ -14,8 +12,10 @@ import {
   createPreviewItem,
   createPreviewScreenContent,
   createStatusMessageElement,
+  ICONS,
   parseTemplate,
   updateProgressRing,
+  WINDOW_TEMPLATE,
 } from './templates';
 
 describe('templates module', () => {
