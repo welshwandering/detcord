@@ -3,37 +3,37 @@
  */
 
 export {
-  dateToSnowflake,
-  snowflakeToDate,
-  formatDuration,
-  escapeHtml,
   buildQueryString,
-  delay,
   clamp,
+  dateToSnowflake,
+  delay,
+  escapeHtml,
+  formatDuration,
+  snowflakeToDate,
 } from './helpers';
 
 export {
-  throttle,
-  debounce,
-  scheduleFrame,
+  appendMany,
   createBatchUpdater,
   createBoundedArray,
   createCleanupManager,
-  appendMany,
-  trimChildren,
-  lazy,
   createOptimizedObserver,
+  debounce,
+  lazy,
   type OptimizedObserverOptions,
+  scheduleFrame,
+  throttle,
+  trimChildren,
 } from './performance';
 
 export {
-  validateRegex,
-  isValidSnowflake,
-  validateSnowflake,
-  isValidGuildId,
-  isValidTokenFormat,
-  validateToken,
-  maskToken,
   DM_GUILD_ID,
+  isValidGuildId,
+  isValidSnowflake,
+  isValidTokenFormat,
+  maskToken,
   type RegexValidationResult,
+  validateRegex,
+  validateSnowflake,
+  validateToken,
 } from './validators';

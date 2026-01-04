@@ -14,20 +14,20 @@
  * - Cleanup manager for all event listeners
  */
 
-import { DeletionEngine } from '../core/deletion-engine';
 import type {
   DeletionEngineState,
   DeletionEngineStats,
   DiscordMessage,
 } from '../core/deletion-engine';
+import { DeletionEngine } from '../core/deletion-engine';
 import { DiscordApiClient, type DiscordChannel } from '../core/discord-api';
 import { getAuthorId, getChannelIdFromUrl, getGuildIdFromUrl, getToken } from '../core/token';
 import type { DeletionOrder } from '../core/types';
 import { dateToSnowflake, escapeHtml, formatDuration } from '../utils/helpers';
 import {
-  type ThrottledFunction,
   createBoundedArray,
   createCleanupManager,
+  type ThrottledFunction,
   throttle,
   trimChildren,
 } from '../utils/performance';

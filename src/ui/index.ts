@@ -2,24 +2,24 @@
  * UI modules for Detcord
  */
 
-export { DetcordUI } from './controller';
 export type { DetcordUIOptions } from './controller';
+export { DetcordUI } from './controller';
 
 // Effects exports
 export {
   createConfetti,
-  runCountdownSequence,
   createStatusRotator,
-  shakeElement,
   flashElement,
+  runCountdownSequence,
   STATUS_MESSAGES,
+  shakeElement,
 } from './effects';
 
 // Template exports
 export type { PreviewMessage } from './templates';
 export {
+  createConfettiContainer,
+  createCountdownOverlay,
   createPreviewScreenContent,
   createStatusMessageElement,
-  createCountdownOverlay,
-  createConfettiContainer,
 } from './templates';

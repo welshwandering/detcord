@@ -4,11 +4,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  type SavedProgress,
   clearProgress,
   getDeletionsUntilSave,
   hasExistingSession,
   loadProgress,
+  type SavedProgress,
   saveProgress,
   shouldSaveProgress,
 } from './persistence';

@@ -5,24 +5,22 @@
  * It handles rate limiting, retries, pagination, and progress tracking.
  */
 
+import { dateToSnowflake, snowflakeToDate } from '../utils/helpers';
+import { validateRegex } from '../utils/validators';
 import type {
   DiscordMessage as ApiDiscordMessage,
   RateLimitInfo as ApiRateLimitInfo,
   SearchResponse as ApiSearchResponse,
 } from './discord-api';
-
 import {
-  type SavedFilters,
-  type SavedProgress,
   clearProgress,
   hasExistingSession,
   loadProgress,
+  type SavedFilters,
+  type SavedProgress,
   saveProgress,
   shouldSaveProgress,
 } from './persistence';
-
-import { dateToSnowflake, snowflakeToDate } from '../utils/helpers';
-import { validateRegex } from '../utils/validators';
 
 // =============================================================================
 // Types and Interfaces
