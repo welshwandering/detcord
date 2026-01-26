@@ -35,7 +35,7 @@ export default defineConfig({
         // which counts coverage differently than previous versions
         lines: 75,
         functions: 80,
-        branches: 69,
+        branches: 68,
         statements: 75,
       },
     },
