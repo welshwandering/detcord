@@ -122,6 +122,8 @@ export interface DeletionEngineState {
   deletedCount: number;
   /** Number of messages that failed to delete */
   failedCount: number;
+  /** Number of messages skipped (permanently undeletable - threads, permissions, etc.) */
+  skippedCount: number;
   /** Total number of messages found matching filters (current remaining from latest search) */
   totalFound: number;
   /** Initial total found on first search (used for progress calculation) */
@@ -258,6 +260,7 @@ export class DeletionEngine {
     paused: false,
     deletedCount: 0,
     failedCount: 0,
+    skippedCount: 0,
     totalFound: 0,
     initialTotalFound: 0,
     currentOffset: 0,
@@ -277,6 +280,7 @@ export class DeletionEngine {
   private pauseResolve: (() => void) | null = null;
   private compiledPattern: RegExp | null = null;
   private attemptedMessageIds: Set<string> = new Set();
+  private permanentlyFailedMessageIds: Set<string> = new Set();
 
   // Rate limit smoothing state
   private consecutiveSuccesses = 0;
@@ -661,6 +665,7 @@ export class DeletionEngine {
       paused: false,
       deletedCount: 0,
       failedCount: 0,
+      skippedCount: 0,
       totalFound: 0,
       initialTotalFound: 0,
       currentOffset: 0,
@@ -688,6 +693,7 @@ export class DeletionEngine {
 
     // Reset attempted message tracking
     this.attemptedMessageIds = new Set();
+    this.permanentlyFailedMessageIds = new Set();
   }
 
   /**
@@ -713,10 +719,13 @@ export class DeletionEngine {
   /**
    * Deletion loop for newest-first ordering (default behavior).
    * Uses offset 0 and lets Discord return newest messages first.
+   * When permanently failed messages block progress, uses maxId to skip past them.
    */
   private async runNewestFirstDeletionLoop(): Promise<void> {
     let emptyPageRetries = 0;
     let hasMorePages = true;
+    // Track maxId for skipping past permanently failed messages
+    let skipMaxId: string | undefined;
 
     while (hasMorePages && !this.stopRequested) {
       // Check for pause
@@ -728,8 +737,8 @@ export class DeletionEngine {
         break;
       }
 
-      // Search for messages (always from offset 0)
-      const messages = await this.searchWithRetry();
+      // Search for messages (always from offset 0, but may use skipMaxId to skip past blocked messages)
+      const messages = await this.searchWithRetry(skipMaxId);
 
       // Filter out messages we've already attempted to delete
       // This handles stale search index returning already-deleted messages
@@ -742,6 +751,34 @@ export class DeletionEngine {
         // 1. If the raw search returned 0 messages, Discord's index is caught up - stop
         // 2. If totalFound > 0 but we got empty filtered results, index might be stale
         const rawSearchReturnedMessages = messages.length > 0;
+
+        // Check if all returned messages are permanently undeletable (threads, permissions, etc.)
+        const allPermanentlyFailed =
+          rawSearchReturnedMessages &&
+          messages.every((msg) => this.permanentlyFailedMessageIds.has(msg.id));
+
+        if (allPermanentlyFailed) {
+          // Check if there are likely more messages beyond the permanently failed ones
+          // Compare totalFound (remaining messages) to permanently failed count
+          // If totalFound > permanently failed, there are messages we haven't tried yet
+          const untried = this.state.totalFound - this.permanentlyFailedMessageIds.size;
+
+          if (untried > 0) {
+            // There are more messages - skip past the blocked ones using maxId
+            // Find the oldest message in the current batch and search before it
+            const oldestInBatch = messages.reduce((oldest, msg) =>
+              BigInt(msg.id) < BigInt(oldest.id) ? msg : oldest,
+            );
+            skipMaxId = oldestInBatch.id;
+            emptyPageRetries = 0; // Reset retries since we're trying a new search range
+            await this.delay(this.getSearchDelay());
+            continue;
+          }
+          // All remaining messages cannot be deleted - exit cleanly
+          hasMorePages = false;
+          break;
+        }
+
         const apiReportsMoreMessages = this.state.totalFound > 0 && rawSearchReturnedMessages;
 
         if (emptyPageRetries >= MAX_EMPTY_PAGE_RETRIES && !apiReportsMoreMessages) {
@@ -749,8 +786,29 @@ export class DeletionEngine {
           hasMorePages = false;
         } else if (emptyPageRetries >= MAX_EMPTY_PAGE_RETRIES && apiReportsMoreMessages) {
           // API still reports messages but they're all already attempted
-          // Discord's index is stale - reset retry counter and keep trying
-          emptyPageRetries = Math.floor(MAX_EMPTY_PAGE_RETRIES / 2);
+          // Only reset retry counter if there are non-permanently-failed messages
+          const hasRecoverableMessages = messages.some(
+            (msg) => !this.permanentlyFailedMessageIds.has(msg.id),
+          );
+
+          if (hasRecoverableMessages) {
+            // Discord's index is stale - reset retry counter and keep trying
+            emptyPageRetries = Math.floor(MAX_EMPTY_PAGE_RETRIES / 2);
+          } else {
+            // All remaining messages are permanently failed - check if we should skip
+            // Compare totalFound to permanently failed count (not total processed)
+            const untried = this.state.totalFound - this.permanentlyFailedMessageIds.size;
+            if (untried > 0) {
+              // Skip past blocked messages
+              const oldestInBatch = messages.reduce((oldest, msg) =>
+                BigInt(msg.id) < BigInt(oldest.id) ? msg : oldest,
+              );
+              skipMaxId = oldestInBatch.id;
+              emptyPageRetries = 0;
+            } else {
+              hasMorePages = false;
+            }
+          }
         }
 
         // Use exponential backoff - wait longer with each empty page
@@ -761,6 +819,10 @@ export class DeletionEngine {
         await this.delay(backoffDelay);
         continue;
       }
+
+      // Reset empty page counter and skipMaxId on successful fetch of new messages
+      emptyPageRetries = 0;
+      skipMaxId = undefined;
 
       // Reset empty page counter on successful fetch of new messages
       emptyPageRetries = 0;
@@ -829,16 +891,36 @@ export class DeletionEngine {
       if (newMessages.length === 0) {
         emptyPageRetries++;
 
-        if (emptyPageRetries >= MAX_EMPTY_PAGE_RETRIES) {
-          // No more messages in this window
+        // Check if all returned messages are permanently undeletable
+        const rawSearchReturnedMessages = messages.length > 0;
+        const allPermanentlyFailed =
+          rawSearchReturnedMessages &&
+          messages.every((msg) => this.permanentlyFailedMessageIds.has(msg.id));
+
+        if (allPermanentlyFailed) {
+          // All remaining messages in this window cannot be deleted - move to next window
           hasMoreInWindow = false;
-        } else {
-          // Use exponential backoff
-          const backoffDelay = Math.round(
-            this.getSearchDelay() * EMPTY_PAGE_BACKOFF_MULTIPLIER ** (emptyPageRetries - 1),
-          );
-          await this.delay(backoffDelay);
+          break;
         }
+
+        if (emptyPageRetries >= MAX_EMPTY_PAGE_RETRIES) {
+          // Check if there are recoverable messages before giving up on this window
+          const hasRecoverableMessages =
+            rawSearchReturnedMessages &&
+            messages.some((msg) => !this.permanentlyFailedMessageIds.has(msg.id));
+
+          if (!hasRecoverableMessages) {
+            // No more messages in this window
+            hasMoreInWindow = false;
+          }
+          // Otherwise continue with backoff
+        }
+
+        // Use exponential backoff
+        const backoffDelay = Math.round(
+          this.getSearchDelay() * EMPTY_PAGE_BACKOFF_MULTIPLIER ** (emptyPageRetries - 1),
+        );
+        await this.delay(backoffDelay);
         continue;
       }
 
@@ -896,6 +978,9 @@ export class DeletionEngine {
         }
       } else {
         this.state.failedCount++;
+        // Mark as permanently failed (won't retry) - handles 403 errors from threads, permissions, etc.
+        this.permanentlyFailedMessageIds.add(message.id);
+        this.state.skippedCount++;
       }
 
       this.callbacks.onProgress?.(this.getState(), this.getStats(), message);
@@ -910,8 +995,10 @@ export class DeletionEngine {
 
   /**
    * Searches for messages with retry logic for rate limits.
+   *
+   * @param overrideMaxId - Optional maxId to use instead of configured one (for skipping past blocked messages)
    */
-  private async searchWithRetry(): Promise<DiscordMessage[]> {
+  private async searchWithRetry(overrideMaxId?: string): Promise<DiscordMessage[]> {
     const maxRetries = this.options?.maxRetries ?? DEFAULT_MAX_RETRIES;
     let retries = 0;
 
@@ -938,7 +1025,20 @@ export class DeletionEngine {
         if (opts.hasLink !== undefined) searchParams.hasLink = opts.hasLink;
         if (opts.hasFile !== undefined) searchParams.hasFile = opts.hasFile;
         if (opts.minId !== undefined) searchParams.minId = opts.minId;
-        if (opts.maxId !== undefined) searchParams.maxId = opts.maxId;
+
+        // Use overrideMaxId to skip past permanently failed messages, otherwise use configured maxId
+        if (overrideMaxId !== undefined) {
+          // If both override and configured maxId exist, use the earlier (smaller) one
+          if (opts.maxId !== undefined) {
+            searchParams.maxId =
+              BigInt(overrideMaxId) < BigInt(opts.maxId) ? overrideMaxId : opts.maxId;
+          } else {
+            searchParams.maxId = overrideMaxId;
+          }
+        } else if (opts.maxId !== undefined) {
+          searchParams.maxId = opts.maxId;
+        }
+
         if (opts.includePinned !== undefined) searchParams.includePinned = opts.includePinned;
 
         const response = await this.apiClient.searchMessages(searchParams);
@@ -1098,6 +1198,20 @@ export class DeletionEngine {
     return messages.filter((message) => {
       // Check message type
       if (!DELETABLE_MESSAGE_TYPES.has(message.type)) {
+        return false;
+      }
+
+      // Thread detection: message's channel_id differs from search target
+      // Only applies to channel-specific searches (not guild-wide)
+      if (
+        this.options?.channelId &&
+        !this.options.guildId &&
+        message.channel_id !== this.options.channelId
+      ) {
+        // Message is in a thread - mark as permanently failed and skip
+        this.permanentlyFailedMessageIds.add(message.id);
+        this.attemptedMessageIds.add(message.id);
+        this.state.skippedCount++;
         return false;
       }
 

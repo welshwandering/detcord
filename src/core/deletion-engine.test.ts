@@ -1241,6 +1241,284 @@ describe('DeletionEngine', () => {
     });
   });
 
+  describe('permanent failure handling', () => {
+    it('should exit when all remaining messages are permanently undeletable', async () => {
+      // Create messages that will all fail with 403
+      const messages = [
+        createMockMessage({ id: '1' }),
+        createMockMessage({ id: '2' }),
+        createMockMessage({ id: '3' }),
+      ];
+
+      let searchCallCount = 0;
+
+      const apiClient: DiscordApiClient = {
+        searchMessages: vi.fn().mockImplementation(async (): Promise<SearchResponse> => {
+          searchCallCount++;
+          // Always return the same messages (simulating stale index)
+          return {
+            messages: messages.map((m) => [m]),
+            total_results: 3,
+          };
+        }),
+        deleteMessage: vi.fn().mockImplementation(async () => {
+          // All deletions fail with 403 (permission denied)
+          const error = new Error('Forbidden') as Error & { statusCode: number };
+          error.statusCode = 403;
+          throw error;
+        }),
+        getRateLimitInfo: vi.fn().mockReturnValue({ remaining: 10, limit: 50, resetAfter: 1000 }),
+      };
+
+      const engine = new DeletionEngine(apiClient);
+      engine.configure(createDefaultOptions());
+
+      const startPromise = engine.start();
+
+      // Advance through deletion attempts - engine should exit cleanly
+      for (let i = 0; i < 50; i++) {
+        await vi.advanceTimersByTimeAsync(100);
+      }
+
+      await startPromise;
+
+      const state = engine.getState();
+
+      // Should have tracked skipped messages
+      expect(state.skippedCount).toBe(3);
+      expect(state.failedCount).toBe(3);
+      expect(state.deletedCount).toBe(0);
+
+      // Should not have searched too many times (< 10 calls = no infinite loop)
+      expect(searchCallCount).toBeLessThan(10);
+    });
+
+    it('should not reset retry counter when all messages are permanently failed', async () => {
+      const messages = [createMockMessage({ id: '1' }), createMockMessage({ id: '2' })];
+
+      let searchCallCount = 0;
+
+      const apiClient: DiscordApiClient = {
+        searchMessages: vi.fn().mockImplementation(async (): Promise<SearchResponse> => {
+          searchCallCount++;
+          return {
+            messages: messages.map((m) => [m]),
+            total_results: 2,
+          };
+        }),
+        deleteMessage: vi.fn().mockImplementation(async () => {
+          const error = new Error('Forbidden') as Error & { statusCode: number };
+          error.statusCode = 403;
+          throw error;
+        }),
+        getRateLimitInfo: vi.fn().mockReturnValue({ remaining: 10, limit: 50, resetAfter: 1000 }),
+      };
+
+      const engine = new DeletionEngine(apiClient);
+      engine.configure(createDefaultOptions());
+
+      const startPromise = engine.start();
+
+      for (let i = 0; i < 100; i++) {
+        await vi.advanceTimersByTimeAsync(100);
+      }
+
+      await startPromise;
+
+      // Should exit relatively quickly without hitting MAX_EMPTY_PAGE_RETRIES * 2
+      // MAX_EMPTY_PAGE_RETRIES is 5, so we should have < 10 search calls
+      expect(searchCallCount).toBeLessThan(10);
+    });
+
+    it('should track skippedCount for 403 failures', async () => {
+      const messages = [
+        createMockMessage({ id: '1' }),
+        createMockMessage({ id: '2' }),
+        createMockMessage({ id: '3' }),
+      ];
+
+      let searchCallCount = 0;
+      let deleteCallCount = 0;
+
+      const apiClient: DiscordApiClient = {
+        searchMessages: vi.fn().mockImplementation(async (): Promise<SearchResponse> => {
+          searchCallCount++;
+          return {
+            messages: searchCallCount === 1 ? messages.map((m) => [m]) : [],
+            total_results: 3,
+          };
+        }),
+        deleteMessage: vi.fn().mockImplementation(async () => {
+          deleteCallCount++;
+          // First message succeeds, rest fail with 403
+          if (deleteCallCount === 1) {
+            return { success: true };
+          }
+          const error = new Error('Forbidden') as Error & { statusCode: number };
+          error.statusCode = 403;
+          throw error;
+        }),
+        getRateLimitInfo: vi.fn().mockReturnValue({ remaining: 10, limit: 50, resetAfter: 1000 }),
+      };
+
+      const engine = new DeletionEngine(apiClient);
+      engine.configure(createDefaultOptions());
+
+      const startPromise = engine.start();
+
+      for (let i = 0; i < 50; i++) {
+        await vi.advanceTimersByTimeAsync(100);
+      }
+
+      await startPromise;
+
+      const state = engine.getState();
+      expect(state.deletedCount).toBe(1);
+      expect(state.failedCount).toBe(2);
+      expect(state.skippedCount).toBe(2);
+    });
+
+    it('should skip messages with mismatched channel_id (thread detection)', async () => {
+      // Messages from threads have a different channel_id
+      const messages = [
+        createMockMessage({ id: '1', channel_id: 'channel123' }), // Main channel
+        createMockMessage({ id: '2', channel_id: 'thread456' }), // Thread
+        createMockMessage({ id: '3', channel_id: 'channel123' }), // Main channel
+        createMockMessage({ id: '4', channel_id: 'thread789' }), // Another thread
+      ];
+
+      let searchCallCount = 0;
+
+      const apiClient: DiscordApiClient = {
+        searchMessages: vi.fn().mockImplementation(async (): Promise<SearchResponse> => {
+          searchCallCount++;
+          return {
+            messages: searchCallCount === 1 ? messages.map((m) => [m]) : [],
+            total_results: 4,
+          };
+        }),
+        deleteMessage: vi.fn().mockResolvedValue({ success: true }),
+        getRateLimitInfo: vi.fn().mockReturnValue({ remaining: 10, limit: 50, resetAfter: 1000 }),
+      };
+
+      const engine = new DeletionEngine(apiClient);
+      // Channel-specific search (no guildId)
+      engine.configure({
+        ...createDefaultOptions(),
+        channelId: 'channel123',
+      });
+
+      const startPromise = engine.start();
+
+      for (let i = 0; i < 50; i++) {
+        await vi.advanceTimersByTimeAsync(100);
+      }
+
+      await startPromise;
+
+      // Should only delete messages from the main channel
+      expect(apiClient.deleteMessage).toHaveBeenCalledTimes(2);
+      expect(apiClient.deleteMessage).toHaveBeenCalledWith('channel123', '1');
+      expect(apiClient.deleteMessage).toHaveBeenCalledWith('channel123', '3');
+
+      const state = engine.getState();
+      expect(state.deletedCount).toBe(2);
+      expect(state.skippedCount).toBe(2); // Thread messages skipped
+    });
+
+    it('should initialize skippedCount in state', () => {
+      const apiClient = createMockApiClient();
+      const engine = new DeletionEngine(apiClient);
+      const state = engine.getState();
+
+      expect(state.skippedCount).toBe(0);
+    });
+
+    it('should skip past permanently failed messages using maxId when more messages exist', async () => {
+      // First batch: 3 messages all fail with 403 (totalFound: 100)
+      // Engine should use maxId to skip past them and find older messages
+      // Second batch: 2 new messages that succeed
+      const failedMessages = [
+        createMockMessage({ id: '300' }),
+        createMockMessage({ id: '200' }),
+        createMockMessage({ id: '100' }),
+      ];
+
+      const successMessages = [createMockMessage({ id: '50' }), createMockMessage({ id: '25' })];
+
+      let searchCallCount = 0;
+      let deleteCallCount = 0;
+
+      const apiClient: DiscordApiClient = {
+        searchMessages: vi
+          .fn()
+          .mockImplementation(async (params: { maxId?: string }): Promise<SearchResponse> => {
+            searchCallCount++;
+
+            // If maxId is set (skip mode), return success messages
+            if (params.maxId !== undefined) {
+              return {
+                messages: successMessages.map((m) => [m]),
+                total_results: 97, // 100 - 3 failed
+              };
+            }
+
+            // Without maxId: return failed messages (simulates stale index returning same messages)
+            if (searchCallCount <= 2) {
+              return {
+                messages: failedMessages.map((m) => [m]),
+                total_results: 100,
+              };
+            }
+
+            // Subsequent calls: empty
+            return {
+              messages: [],
+              total_results: 0,
+            };
+          }),
+        deleteMessage: vi.fn().mockImplementation(async () => {
+          deleteCallCount++;
+          // First 3 deletions fail (failed messages), rest succeed
+          if (deleteCallCount <= 3) {
+            const error = new Error('Forbidden') as Error & { statusCode: number };
+            error.statusCode = 403;
+            throw error;
+          }
+          return { success: true };
+        }),
+        getRateLimitInfo: vi.fn().mockReturnValue({ remaining: 10, limit: 50, resetAfter: 1000 }),
+      };
+
+      const engine = new DeletionEngine(apiClient);
+      engine.configure(createDefaultOptions());
+
+      const startPromise = engine.start();
+
+      // Advance through all operations
+      for (let i = 0; i < 100; i++) {
+        await vi.advanceTimersByTimeAsync(100);
+      }
+
+      await startPromise;
+
+      const state = engine.getState();
+
+      // Should have deleted the success messages after skipping past failed ones
+      expect(state.deletedCount).toBe(2);
+      expect(state.failedCount).toBe(3);
+      expect(state.skippedCount).toBe(3);
+
+      // Should have made multiple search calls (at least 2 - initial and after skip)
+      expect(searchCallCount).toBeGreaterThanOrEqual(2);
+
+      // Verify maxId was used to skip past failed messages
+      const searchCalls = vi.mocked(apiClient.searchMessages).mock.calls;
+      const callsWithMaxId = searchCalls.filter((call) => call[0].maxId !== undefined);
+      expect(callsWithMaxId.length).toBeGreaterThan(0);
+    });
+  });
+
   describe('ping tracking', () => {
     it('should record ping times for rolling average', async () => {
       const messages = Array.from({ length: 25 }, (_, i) => createMockMessage({ id: String(i) }));

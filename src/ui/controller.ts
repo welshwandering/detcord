@@ -3288,6 +3288,7 @@ export class DetcordUI {
         paused: false,
         deletedCount: 0,
         failedCount: 0,
+        skippedCount: 0,
         totalFound: 0,
         initialTotalFound: 0,
         currentOffset: 0,

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-01-25
+
+### Fixed
+
+- Fix infinite loop when messages fail to delete (403 errors from threads, permissions, etc.)
+- Fix premature exit when first batch of messages are undeletable - now skips past blocked messages using maxId
+- Fix early termination at ~50% progress due to incorrect comparison of remaining vs processed message counts
+
+### Added
+
+- Track permanently failed messages separately to detect when all remaining messages are undeletable
+- Add `skippedCount` to deletion state for tracking messages that cannot be deleted
+- Proactive thread detection - skip messages with mismatched channel_id before attempting deletion
+
 ## [1.0.1] - 2026-01-04
 
 ### Changed
