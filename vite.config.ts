@@ -1,18 +1,26 @@
+import { readFileSync } from 'node:fs';
 import { defineConfig, type Plugin } from 'vite';
+
+const { version } = JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
+) as { version: string };
+const releaseAssetUrl =
+  'https://github.com/canaryframe/detcord/releases/latest/download/detcord.user.js';
 
 const userscriptBanner = `// ==UserScript==
 // @name            Detcord
 // @description     Bulk delete your own Discord messages - Fast, secure, privacy-focused
-// @version         1.0.0
+// @version         ${version}
 // @author          Welsh Wandering
-// @homepageURL     https://github.com/welshwandering/detcord
-// @supportURL      https://github.com/welshwandering/detcord/discussions
+// @homepageURL     https://github.com/canaryframe/detcord
+// @supportURL      https://github.com/canaryframe/detcord/issues
+// @updateURL       ${releaseAssetUrl}
+// @downloadURL     ${releaseAssetUrl}
 // @match           https://*.discord.com/app
 // @match           https://*.discord.com/channels/*
 // @match           https://*.discord.com/login
 // @license         MIT
 // @namespace       https://github.com/welshwandering/detcord
-// @icon            https://welshwandering.github.io/detcord/images/icon128.png
 // @grant           none
 // @run-at          document-end
 // ==/UserScript==
@@ -43,18 +51,14 @@ export default defineConfig(({ mode }) => ({
       formats: mode === 'userscript' ? ['iife'] : ['es', 'iife'],
       fileName: (format) => (format === 'iife' ? 'detcord.user.js' : `detcord.${format}.js`),
     },
-    rollupOptions: {
-      output: {
-        inlineDynamicImports: true,
-      },
-    },
-    minify: mode === 'userscript' ? false : 'esbuild',
+    minify: mode === 'userscript' ? false : 'oxc',
     sourcemap: mode !== 'userscript',
   },
   // Define build-time constants for security
   // __DEV__ is false in userscript builds to prevent debug API exposure
   define: {
     __DEV__: mode !== 'userscript',
+    __VERSION__: JSON.stringify(version),
   },
   plugins: mode === 'userscript' ? [prependBanner(userscriptBanner)] : [],
 }));

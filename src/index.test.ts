@@ -6,13 +6,19 @@
  * early-return conditions.
  */
 
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { destroy, init, VERSION } from './index';
+
+const { version: packageVersion } = JSON.parse(readFileSync('package.json', 'utf8')) as {
+  version: string;
+};
 
 describe('index module', () => {
   const originalLocation = window.location;
 
   beforeEach(() => {
+    destroy();
     vi.clearAllMocks();
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -20,6 +26,8 @@ describe('index module', () => {
   });
 
   afterEach(() => {
+    destroy();
+    vi.useRealTimers();
     vi.restoreAllMocks();
     // Reset window.Detcord
     (window as unknown as Record<string, unknown>).Detcord = undefined;
@@ -33,7 +41,7 @@ describe('index module', () => {
 
   describe('VERSION', () => {
     it('should export version string', () => {
-      expect(VERSION).toBe('1.0.0');
+      expect(VERSION).toBe(packageVersion);
       expect(typeof VERSION).toBe('string');
     });
   });
@@ -63,19 +71,68 @@ describe('index module', () => {
       expect(console.warn).toHaveBeenCalledWith('[Detcord] Not on Discord');
     });
 
-    it('should log and return early if on login page', () => {
+    it('should wait on login and initialize once after pushState navigation', () => {
+      const location = { hostname: 'discord.com', pathname: '/login' };
       Object.defineProperty(window, 'location', {
-        value: { hostname: 'discord.com', pathname: '/login' },
+        value: location,
+        writable: true,
+        configurable: true,
+      });
+      vi.spyOn(window.history, 'pushState').mockImplementation((_data, _unused, url) => {
+        location.pathname = new URL(String(url), 'https://discord.com').pathname;
+      });
+
+      init();
+      init();
+      window.dispatchEvent(new PopStateEvent('popstate'));
+      window.history.pushState({}, '', '/channels/123/456');
+      window.history.pushState({}, '', '/channels/123/789');
+
+      const waitingLogs = vi
+        .mocked(console.log)
+        .mock.calls.filter(([message]) => message === '[Detcord] On login page, waiting...');
+      expect(waitingLogs).toHaveLength(1);
+      const versionLogs = vi
+        .mocked(console.log)
+        .mock.calls.filter(([message]) => message === `[Detcord] v${VERSION} loaded`);
+      expect(versionLogs).toHaveLength(1);
+    });
+
+    it('should initialize after replaceState navigation from login', () => {
+      const location = { hostname: 'discord.com', pathname: '/login' };
+      Object.defineProperty(window, 'location', {
+        value: location,
+        writable: true,
+        configurable: true,
+      });
+      vi.spyOn(window.history, 'replaceState').mockImplementation((_data, _unused, url) => {
+        location.pathname = new URL(String(url), 'https://discord.com').pathname;
+      });
+
+      init();
+      window.history.replaceState({}, '', '/channels/123/456');
+
+      expect(console.log).toHaveBeenCalledWith(`[Detcord] v${VERSION} loaded`);
+    });
+
+    it('should initialize from the polling fallback after the login path changes', () => {
+      vi.useFakeTimers();
+      const location = { hostname: 'discord.com', pathname: '/login' };
+      Object.defineProperty(window, 'location', {
+        value: location,
         writable: true,
         configurable: true,
       });
 
       init();
+      location.pathname = '/channels/123/456';
+      vi.advanceTimersByTime(2_000);
 
-      expect(console.log).toHaveBeenCalledWith('[Detcord] On login page, waiting...');
+      expect(console.log).toHaveBeenCalledWith(`[Detcord] v${VERSION} loaded`);
+      vi.useRealTimers();
     });
 
-    it('should log version when on Discord channels', () => {
+    it('should initialize only once when called repeatedly on Discord channels', () => {
       Object.defineProperty(window, 'location', {
         value: { hostname: 'discord.com', pathname: '/channels/123/456' },
         writable: true,
@@ -83,11 +140,15 @@ describe('index module', () => {
       });
 
       init();
+      init();
 
-      expect(console.log).toHaveBeenCalledWith(`[Detcord] v${VERSION} loaded`);
+      const versionLogs = vi
+        .mocked(console.log)
+        .mock.calls.filter(([message]) => message === `[Detcord] v${VERSION} loaded`);
+      expect(versionLogs).toHaveLength(1);
     });
 
-    it('should log version when on Discord app', () => {
+    it('should mount the UI when on Discord app', async () => {
       Object.defineProperty(window, 'location', {
         value: { hostname: 'discord.com', pathname: '/app' },
         writable: true,
@@ -97,6 +158,26 @@ describe('index module', () => {
       init();
 
       expect(console.log).toHaveBeenCalledWith(`[Detcord] v${VERSION} loaded`);
+      await vi.waitFor(() => {
+        expect(console.log).toHaveBeenCalledWith('[Detcord] UI mounted');
+      });
+      expect((window as unknown as Record<string, unknown>).Detcord).toMatchObject({
+        VERSION: packageVersion,
+      });
+    });
+
+    it('should not mount a pending UI after destroy', async () => {
+      Object.defineProperty(window, 'location', {
+        value: { hostname: 'discord.com', pathname: '/app' },
+        writable: true,
+        configurable: true,
+      });
+
+      init();
+      destroy();
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+      expect(console.log).not.toHaveBeenCalledWith('[Detcord] UI mounted');
     });
   });
 
@@ -104,7 +185,7 @@ describe('index module', () => {
     it('should set window.Detcord to undefined', () => {
       // Simulate an existing Detcord object on window
       (window as unknown as Record<string, unknown>).Detcord = {
-        VERSION: '1.0.0',
+        VERSION: packageVersion,
         show: vi.fn(),
         hide: vi.fn(),
       };

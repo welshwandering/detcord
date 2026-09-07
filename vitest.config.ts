@@ -1,10 +1,16 @@
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'vitest/config';
+
+const { version } = JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
+) as { version: string };
 
 export default defineConfig({
   // Define build-time constants for tests
   // __DEV__ is true in test environment to enable debug API testing
   define: {
     __DEV__: true,
+    __VERSION__: JSON.stringify(version),
   },
   test: {
     globals: true,
