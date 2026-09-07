@@ -1,251 +1,168 @@
 # Contributing to Detcord
 
-Thank you for your interest in contributing to Detcord! This document provides guidelines and information to make the contribution process smooth and effective.
+Contributions are welcome when they are focused, tested, and consistent with the browser-only security model.
 
-## Code of Conduct
+## Code of conduct
 
-This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). By participating, you agree to uphold this code. Please report unacceptable behavior by opening a GitHub issue.
+Participation is governed by the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). Report public conduct concerns through a [GitHub issue](https://github.com/canaryframe/detcord/issues); use a [private security advisory](https://github.com/canaryframe/detcord/security/advisories/new) when a report contains sensitive information.
 
-## Getting Started
+## Before starting
 
-### Prerequisites
+1. Search [existing issues](https://github.com/canaryframe/detcord/issues).
+2. Open an issue before a substantial feature or architectural change.
+3. Read [AGENTS.md](AGENTS.md) for the architecture, API contracts, security rules, and testing conventions.
 
-- Node.js 18 or later
-- npm (comes with Node.js)
-- A userscript manager (Tampermonkey, Violentmonkey, or Greasemonkey) for testing
+GitHub Discussions is not enabled. Use Issues for support, questions, design proposals, and implementation discussion.
 
-### Development Setup
+## Prerequisites
+
+- Node.js 22.12 or later; Node.js 24 is recommended and used in CI
+- npm
+- Tampermonkey or Violentmonkey for browser testing
+
+## Development setup
 
 ```bash
-# Clone your fork
 git clone https://github.com/YOUR_USERNAME/detcord.git
 cd detcord
-
-# Install dependencies
 npm install
-
-# Verify setup
-npm run test
-npm run lint
 npm run typecheck
+npm run lint
+npm run test
 ```
 
-### Available Commands
+## Commands
 
-| Command | Description |
-|---------|-------------|
-| `npm run dev` | Start development server with hot reload |
-| `npm run build` | Build ES module and IIFE bundles |
-| `npm run build:userscript` | Build userscript with Tampermonkey header |
-| `npm run test` | Run tests once |
-| `npm run test:watch` | Run tests in watch mode |
-| `npm run test:coverage` | Run tests with coverage report |
-| `npm run lint` | Check for linting issues |
-| `npm run lint:fix` | Auto-fix linting issues |
-| `npm run format` | Format code with Biome |
-| `npm run typecheck` | Run TypeScript type checking |
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Start the Vite development server. |
+| `npm run build` | Build the development bundles. |
+| `npm run build:userscript` | Build `dist/detcord.user.js`. |
+| `npm run test` | Run the Vitest suite once. |
+| `npm run test:watch` | Run Vitest in watch mode. |
+| `npm run test:coverage` | Run tests and produce the coverage report. |
+| `npm run lint` | Check the repository with Biome. |
+| `npm run lint:fix` | Apply safe Biome fixes. |
+| `npm run format` | Format supported files with Biome. |
+| `npm run typecheck` | Run strict TypeScript checking. |
 
-## Ways to Contribute
+## Ways to contribute
 
-### Good First Issues
+- Fix a reproducible bug.
+- Add tests for an uncovered behaviour.
+- Improve documentation or accessibility.
+- Reduce browser work or memory use without changing behaviour.
+- Propose a feature through an issue before implementing it.
 
-Look for issues labeled [`good first issue`](https://github.com/welshwandering/detcord/labels/good%20first%20issue) - these are specifically chosen as entry points for new contributors.
+Issues labelled [`good first issue`](https://github.com/canaryframe/detcord/labels/good%20first%20issue) are intended to have limited scope and enough context for a first contribution.
 
-### Types of Contributions
+## Workflow
 
-- **Bug fixes**: Found something broken? We'd love a fix!
-- **Documentation**: Improvements to README, code comments, or guides
-- **Tests**: Increase coverage or add missing test cases
-- **Features**: New functionality (please discuss first in an issue)
-- **Accessibility**: Improvements to keyboard navigation, ARIA labels, etc.
-- **Performance**: Optimizations that don't change behavior
+1. Fork the repository and create a branch from `main`.
+2. Make one focused change.
+3. Add a test that fails against the old behaviour for every fix.
+4. Run the relevant tests, then the complete validation commands.
+5. Update user and developer documentation when behaviour changes.
+6. Push the branch and open a pull request using a Conventional Commit title.
 
-## Making Changes
+Example branch names:
 
-### Before You Start
-
-1. **Check existing issues** - someone may already be working on it
-2. **Open an issue first** for significant changes to discuss the approach
-3. **Read the architecture docs** - see `CLAUDE.md` for code conventions and structure
-
-### Development Workflow
-
-1. **Fork** the repository to your GitHub account
-2. **Clone** your fork locally
-3. **Create a branch** from `main`:
-   ```bash
-   git checkout -b feature/your-feature-name
-   # or
-   git checkout -b fix/issue-description
-   ```
-4. **Make your changes** with clear, incremental commits
-5. **Test thoroughly**:
-   ```bash
-   npm run test
-   npm run lint
-   npm run typecheck
-   ```
-6. **Push** to your fork and open a Pull Request
-
-### Commit Messages
-
-We use [Conventional Commits](https://www.conventionalcommits.org/) for clear history and automated changelogs:
-
-```
-type(scope): short description
-
-[optional longer description]
-
-[optional footer with issue references]
+```text
+fix/resume-cursor
+feat/dry-run
+docs/chromium-install
 ```
 
-**Types:**
-- `feat`: New feature
-- `fix`: Bug fix
-- `docs`: Documentation only
-- `style`: Code style (formatting, no logic change)
-- `refactor`: Code restructuring (no feature/fix)
-- `test`: Adding or updating tests
-- `chore`: Maintenance tasks
+## Commit messages
 
-**Examples:**
-```
-feat(ui): add countdown animation before deletion
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/) and are checked in CI. Contributors remain responsible for checking messages before pushing.
 
-The countdown shows 3-2-1-BOOM sequence with abort option.
-User can click anywhere to cancel during countdown.
+```text
+fix(engine): preserve filters during retry
+
+Keep the configured content and attachment filters when a search is
+retried after Discord returns a temporary indexing response.
 
 Closes #42
 ```
 
-```
-fix(api): handle 202 response during search indexing
+Common types are `feat`, `fix`, `docs`, `refactor`, `test`, `ci`, and `chore`.
 
-Discord returns 202 when search index is being built.
-Now waits and retries instead of treating as error.
-```
+## Code standards
 
-### Code Standards
+### TypeScript
 
-#### TypeScript
+- Keep strict type checking enabled, including `exactOptionalPropertyTypes` and `noUncheckedIndexedAccess`.
+- Do not introduce `any` or unsafe type assertions to bypass a contract.
+- Add JSDoc to exported functions.
+- Reuse shared validators, storage helpers, and typed errors.
+- Keep functions below Biome's cognitive-complexity limit.
 
-- **Strict mode** - no `any` types allowed
-- **Explicit return types** on public functions
-- **Descriptive names** - avoid abbreviations
-- **Small functions** - single responsibility principle
+### Formatting
 
-#### Style
+- Use two spaces for indentation.
+- Use single quotes in TypeScript.
+- Use semicolons.
+- Run Biome rather than formatting files by hand.
 
-- **Biome** handles all formatting
-- **Tabs** for indentation
-- **Single quotes** for strings
-- **Semicolons** required
+### Browser and security constraints
 
-#### Testing
-
-- **>80% coverage** required for new code
-- **Co-located tests** - `foo.test.ts` next to `foo.ts`
-- **Descriptive test names** - should read like documentation
-- **Mock external dependencies** - don't hit real APIs
-
-#### Documentation
-
-- **JSDoc comments** for all exported functions
-- **Update README** if adding user-facing features
-- **Update CHANGELOG** for notable changes
-
-### Pull Request Guidelines
-
-1. **Fill out the PR template** completely
-2. **Link related issues** using keywords (Closes #123)
-3. **Keep PRs focused** - one feature or fix per PR
-4. **Include tests** for new functionality
-5. **Update docs** if behavior changes
-6. **Respond to feedback** promptly
-
-#### PR Title Format
-
-Use the same format as commit messages:
-```
-feat(ui): add dark mode toggle
-fix(token): handle expired session gracefully
-docs: add troubleshooting section to README
-```
+- The production result must remain a single browser userscript without runtime dependencies.
+- Tokens must never be logged, persisted, or sent outside `discord.com`.
+- Only the signed-in user's messages may be deleted.
+- API pacing and Discord's rate-limit responses must be respected.
+- User-controlled content must be rendered safely.
 
 ## Testing
 
-Tests use [Vitest](https://vitest.dev/) with jsdom for browser API simulation.
+Tests use Vitest with jsdom and are co-located with source files.
+
+- Stub `fetch`; tests must never call Discord.
+- Use the actual `DiscordApiError` shapes produced by the API client.
+- Cover both the success path and the relevant failure or cancellation path.
+- Use fake timers carefully and restore them after each test.
+- Keep browser-only APIs isolated behind small helpers where possible.
+
+Tests run in CI on every pull request; coverage is reported.
+
+Before opening a pull request, run:
 
 ```bash
-npm run test           # Run once
-npm run test:watch     # Watch mode (recommended during development)
-npm run test:coverage  # Generate coverage report
+npm run typecheck
+npm run lint
+npx vitest run --coverage
+npm run build:userscript
 ```
 
-### Writing Tests
+For manual browser testing:
 
-```typescript
-import { describe, it, expect, vi } from 'vitest';
-import { myFunction } from './my-module';
+1. Build with `npm run build:userscript`.
+2. Install `dist/detcord.user.js` in a userscript manager.
+3. Test at [discord.com/app](https://discord.com/app) using messages you can safely delete.
+4. Check preview, cancellation, Stop, resume, and completion reporting where relevant.
 
-describe('myFunction', () => {
-    it('should handle normal input', () => {
-        expect(myFunction('test')).toBe('expected');
-    });
+## Pull requests
 
-    it('should throw on invalid input', () => {
-        expect(() => myFunction(null)).toThrow();
-    });
-});
-```
+Explain the problem, root cause, and exact change. Name affected functions and data flows where useful. Link the issue with `Closes #123` when the pull request fully resolves it.
 
-### Testing in Browser
+Keep unrelated formatting and refactoring out of the change. Pull requests that alter behaviour need regression tests and corresponding documentation.
 
-1. Run `npm run build:userscript`
-2. Install `dist/detcord.user.js` in your userscript manager
-3. Open Discord in browser and test manually
+## Reporting bugs and requesting features
 
-## Reporting Issues
+- Use the [bug report form](https://github.com/canaryframe/detcord/issues/new?template=bug_report.yml) for reproducible faults.
+- Use the [feature request form](https://github.com/canaryframe/detcord/issues/new?template=feature_request.yml) for proposals.
+- Use a normal [GitHub issue](https://github.com/canaryframe/detcord/issues/new/choose) for questions that do not fit either form.
 
-### Bug Reports
+Never include a Discord token or private message content in an issue.
 
-Use the [Bug Report template](https://github.com/welshwandering/detcord/issues/new?template=bug_report.yml) and include:
+## Security reports
 
-- Browser name and version
-- Userscript manager and version
-- Steps to reproduce
-- Expected vs actual behavior
-- Console errors (F12 → Console tab)
-- Screenshots if helpful
+Do not report vulnerabilities publicly. Use [GitHub Security Advisories](https://github.com/canaryframe/detcord/security/advisories/new) and follow [SECURITY.md](SECURITY.md).
 
-### Feature Requests
+## Releases
 
-Use the [Feature Request template](https://github.com/welshwandering/detcord/issues/new?template=feature_request.yml) and describe:
+Maintainers follow the tag-driven process in [docs/RELEASE_RUNBOOK.md](docs/RELEASE_RUNBOOK.md). A release is not complete until CI has attached and verified `detcord.user.js`.
 
-- The problem you're trying to solve
-- Your proposed solution
-- Alternative approaches you've considered
-- Who would benefit from this feature
+## Licence
 
-## Security Vulnerabilities
-
-**Do NOT open public issues for security vulnerabilities.**
-
-Report security issues via [GitHub Security Advisories](https://github.com/welshwandering/detcord/security/advisories/new). See [SECURITY.md](SECURITY.md) for our full security policy.
-
-## Questions and Discussions
-
-- **General questions**: Open a [Discussion](https://github.com/welshwandering/detcord/discussions)
-- **Implementation questions**: Comment on the relevant issue
-- **Architecture questions**: Check `CLAUDE.md` first, then open an issue
-
-## Recognition
-
-Contributors are recognized in:
-- The GitHub contributors graph
-- Release notes for significant contributions
-- The README for major features
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).
+By contributing, you agree that your contribution is licensed under the [MIT Licence](LICENSE).

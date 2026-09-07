@@ -1,17 +1,17 @@
-name: Bug Report
-description: Report a bug or unexpected behavior
+name: Bug report
+description: Report a reproducible fault or unexpected behaviour
 labels: ["bug", "triage"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to report a bug! Please fill out the form below.
+        Search existing issues before reporting a bug. Remove Discord tokens, private messages, and other sensitive data.
 
   - type: textarea
     id: description
     attributes:
-      label: Bug Description
-      description: A clear and concise description of the bug
+      label: Bug description
+      description: Describe what happened.
       placeholder: What happened?
     validations:
       required: true
@@ -19,21 +19,22 @@ body:
   - type: textarea
     id: expected
     attributes:
-      label: Expected Behavior
-      description: What did you expect to happen?
-      placeholder: What should have happened instead?
+      label: Expected behaviour
+      description: Describe what you expected.
+      placeholder: What should have happened?
     validations:
       required: true
 
   - type: textarea
     id: steps
     attributes:
-      label: Steps to Reproduce
-      description: Steps to reproduce the behavior
+      label: Steps to reproduce
+      description: Include the target, filters, and exact action sequence.
       placeholder: |
-        1. Go to '...'
-        2. Click on '...'
-        3. See error
+        1. Open ...
+        2. Select ...
+        3. Start ...
+        4. Observe ...
     validations:
       required: true
 
@@ -41,12 +42,14 @@ body:
     id: browser
     attributes:
       label: Browser
-      description: Which browser are you using?
+      description: Select the browser used for Discord.
       options:
         - Chrome
-        - Firefox
         - Edge
-        - Safari
+        - Brave
+        - Opera
+        - Vivaldi
+        - Firefox
         - Other
     validations:
       required: true
@@ -54,32 +57,47 @@ body:
   - type: dropdown
     id: userscript-manager
     attributes:
-      label: Userscript Manager
-      description: Which userscript manager are you using?
+      label: Userscript manager
+      description: Select the extension running Detcord.
       options:
         - Tampermonkey
         - Violentmonkey
-        - Greasemonkey
         - Other
     validations:
       required: true
 
+  - type: checkboxes
+    id: chromium-settings
+    attributes:
+      label: Chromium setup
+      description: Tick this only when using a Chromium browser.
+      options:
+        - label: I have enabled Developer mode and Allow user scripts (Chromium)
+
   - type: input
     id: version
     attributes:
-      label: Detcord Version
-      description: Which version of Detcord are you using?
-      placeholder: e.g., 1.0.0
+      label: Detcord version
+      description: Find the version in the userscript manager or Detcord window.
+      placeholder: 1.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: userscript-manager-version
+    attributes:
+      label: Userscript manager version
+      placeholder: 5.x
 
   - type: textarea
     id: console
     attributes:
-      label: Console Output
-      description: Any relevant console errors (F12 → Console tab)
+      label: Console output
+      description: Paste relevant errors only. Remove tokens and private content.
       render: shell
 
   - type: textarea
     id: additional
     attributes:
-      label: Additional Context
-      description: Any other context, screenshots, or information
+      label: Additional context
+      description: Add screenshots or details that do not expose private Discord data.

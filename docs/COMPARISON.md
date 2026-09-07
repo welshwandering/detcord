@@ -1,126 +1,70 @@
-# How Detcord Compares to Other Tools
+# Detcord and other Discord deletion tools
 
-There are several tools that help delete Discord messages. This document provides an honest comparison to help you choose the right one for your needs.
+No Discord message-deletion tool can bypass Discord's API rules. Choose based on the workflow and safeguards you need, not a claim that one project is universally better.
 
----
+## Detcord and Undiscord
 
-## Quick Summary
+[Undiscord](https://github.com/victornpb/undiscord) is an established userscript with 6,652 GitHub stars at the time of this update. It is still maintained; its latest recorded push was in December 2025.
 
-| Tool | Type | Best For |
-|------|------|----------|
-| **Detcord** | Userscript | Users who want reliability, filtering options, and a polished experience |
-| **Undiscord** | Userscript | Power users who want visual message picking and archive import |
-| **Deleo** | CLI Tool | Developers who prefer terminal workflows |
-| **MesDel** | Chrome Extension | Users who only need to clear DMs |
+| Capability | Detcord 1.1.0 | Undiscord |
+| --- | --- | --- |
+| Browser userscript | Yes | Yes |
+| Delete only the signed-in user's messages | Yes | Yes |
+| Preview before deletion | Yes | Yes |
+| Date and content filters | Yes | Yes |
+| Visual message picking | No | Yes |
+| Discord archive import | No | Yes |
+| Resume after closing the browser | Yes, for 24 hours | Start a new run |
+| Adaptive deletion delay | Yes | Handles Discord rate limits with its own strategy |
+| Delete from archived threads | No | No |
 
----
+Star counts and project activity change. Check each repository before installing.
 
-## Detcord vs Undiscord
+### Where Detcord differs
 
-[Undiscord](https://github.com/victornpb/undiscord) is the most popular Discord message deleter with over 6,000 GitHub stars. It's a mature, well-tested tool.
+#### Resume
 
-### What Detcord Does Differently
+Detcord 1.1.0 saves progress every 10 deletions and on Stop. On the next open, it can restore the target, filters, cursor, and counters for the same Discord account. Saved sessions expire after 24 hours. Resume did not work in Detcord 1.0.x.
 
-**Session Resume**
-Detcord saves your progress periodically. If you close your browser or the page crashes during a large deletion, you can pick up where you left off. Undiscord requires starting over.
+#### Adaptive throttling
 
-**Adaptive Rate Limiting**
-Both tools handle Discord's rate limits, but Detcord uses a smoother approach. Instead of jumping between fast and slow speeds, Detcord gradually adjusts—increasing by 50% when throttled, then slowly recovering by 10% increments after consecutive successes. This results in steadier, more predictable deletion speeds.
+Detcord starts with a 1-second deletion delay. After a 429 response it waits for Discord's `retry_after` and adds 50% of the observed gap to the delay. After five clean deletions it reduces that delay by 10%. It also waits before the next request when Discord reports `X-RateLimit-Remaining: 0`.
 
-**Empty Page Handling**
-Discord's search index can be slow to update after deletions. Detcord handles this with exponential backoff (waiting 10s, then 20s, then 40s) before concluding there are no more messages. This prevents premature stops on large deletion jobs.
+#### Empty search pages
 
-**Codebase**
-Detcord is written in TypeScript with a test suite. This doesn't affect end users directly, but it means bugs are caught earlier and the code is easier to maintain.
+Discord's search index can lag behind deletion. Detcord retries an empty page five times with a 1.3 multiplier: 10 seconds, 13 seconds, 16.9 seconds, 22 seconds, and 28.6 seconds.
 
-### What Undiscord Does Better
+#### Guided review
 
-**Visual Message Picker**
-Undiscord lets you click on messages in Discord to visually select the date range boundaries. This is genuinely useful when you want to delete "everything before that message" without hunting for dates.
+Detcord uses a target, filters, preview, and confirmation sequence. The same run configuration is carried from preview into deletion.
 
-**Archive Import**
-If you've requested your data from Discord (Settings → Privacy → Request Data), Undiscord can import the `index.json` to help you find and delete messages across all your channels. Detcord doesn't support this yet.
+### Where Undiscord differs
 
-**Community & Track Record**
-Undiscord has been around longer and has a larger user base. More people have tested it in more situations.
+#### Visual message picker
 
----
+Undiscord can use messages visible in Discord as range boundaries. This is useful when the desired boundary is easier to recognise than to express as a date.
 
-## Detcord vs Deleo
+#### Archive import
 
-[Deleo](https://github.com/notsapinho/deleo) is a command-line tool for deleting Discord messages.
+Undiscord can use Discord data-export information to locate messages across channels. Detcord does not import Discord archives.
 
-### Differences
+#### Track record
 
-| Feature | Detcord | Deleo |
-|---------|---------|-------|
-| Platform | Browser (userscript) | Terminal (CLI) |
-| Date filtering | Yes | No |
-| Content filtering | Yes | No |
-| Regex patterns | Yes | No |
-| Visual interface | Yes | No |
-| Preview before delete | Yes | No |
-| Token setup | Automatic | Manual |
+Undiscord has a larger user base and a longer public history. Detcord's TypeScript implementation and automated tests are engineering choices, not evidence that it is safer or more reliable in every environment.
 
-**When to use Deleo:**
-- You're comfortable with command-line tools
-- You want to script or automate deletion
-- You don't need filtering options
+## Shared limitations
 
-**When to use Detcord:**
-- You want to see what you're deleting before it's gone
-- You need to filter by date, content, or other criteria
-- You prefer a visual interface
+Both tools are constrained by Discord:
 
----
+- They can delete only the signed-in user's own messages.
+- They cannot delete messages in archived threads.
+- They cannot exceed Discord's rate limits safely.
+- They depend on undocumented parts of Discord's web application.
+- They cannot guarantee that Discord will not detect automated use.
+- They run in a browser, not the Discord desktop app.
 
-## Detcord vs MesDel
+## Choosing
 
-[MesDel](https://github.com/Umit-Ulusoy/mesdel) is a Chrome extension focused on DM deletion.
+Use Undiscord if visual message selection, archive import, or its longer track record matters most. Use Detcord if you prefer its guided preview, 24-hour resume, selected-channel workflow, and adaptive pacing.
 
-### Differences
-
-| Feature | Detcord | MesDel |
-|---------|---------|--------|
-| Delete from servers | Yes | No |
-| Delete from channels | Yes | No |
-| Delete from DMs | Yes | Yes |
-| Filtering options | Yes | No |
-| Browser support | All major browsers | Chrome only |
-
-MesDel is designed for a narrower use case. If you only need to clear DMs and want a native Chrome extension, it may work for you. For anything else, Detcord offers more flexibility.
-
----
-
-## Common Features
-
-All of these tools share some baseline capabilities:
-
-- Delete your own messages only (Discord API limitation)
-- Respect rate limits (required to avoid account issues)
-- Work without storing your credentials externally
-- Free and open source
-
----
-
-## Limitations
-
-**None of these tools can:**
-- Delete other people's messages
-- Delete messages faster than Discord allows
-- Guarantee Discord won't detect automated usage
-- Work in the Discord desktop app (browser only)
-
----
-
-## Our Honest Assessment
-
-If you need proven reliability and don't mind a slightly older interface, **Undiscord** is a solid choice—it's popular for good reason.
-
-If you want a cleaner experience with better rate limit handling and session resume, **Detcord** is what we're building toward.
-
-We're not trying to claim Detcord is better in every way. We're trying to build a tool that's reliable, maintainable, and respects your time. If Undiscord's visual message picker or archive import features are important to you, use Undiscord. We might add those features eventually, but we'd rather be honest about what we offer today.
-
----
-
-*Last updated: December 2024*
+Last updated: September 2026.

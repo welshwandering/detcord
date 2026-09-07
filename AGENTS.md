@@ -1,487 +1,399 @@
 # Detcord Developer Documentation
 
-This document provides technical guidance for developers working on Detcord.
+This document describes the architecture and engineering rules for Detcord.
 
 ---
 
-## Important Disclaimers
+## Important disclaimers
 
-> **This project is independent and is NOT affiliated with, endorsed by, or connected to Discord Inc.**
+> **Detcord is independent and is not affiliated with, endorsed by, or connected to Discord Inc.**
 
-> **Discord may change their API at any time, which could break this tool without notice.**
+> **Discord can change its API at any time, which may break Detcord without notice.**
 
-> **This software is provided AS-IS without warranty.**
+> **This software is provided as-is, without warranty.**
 
 ---
 
-## Project Overview
+## Project overview
 
 Detcord is a browser userscript for bulk deletion of a user's own Discord messages.
 
-### Key Technical Constraints
+### Key technical constraints
 
-- **Browser-only execution** - Runs as a Tampermonkey/Violentmonkey/Greasemonkey userscript
-- **No external dependencies** - All code is bundled into a single file
-- **No persistent storage of credentials** - Tokens are never saved
-- **Rate limit compliance** - Must respect Discord's API throttling
-- **Own messages only** - Discord's API only allows deletion of user's own messages
+- **Browser-only execution**: Detcord runs through Tampermonkey or Violentmonkey.
+- **Single-file distribution**: Production builds emit one installable userscript.
+- **No persistent credentials**: Tokens are never written to storage.
+- **Discord-only network access**: Runtime requests go only to `discord.com`.
+- **Rate-limit compliance**: Discord's retry and bucket information must be honoured.
+- **Own messages only**: Discord's API allows users to delete only their own messages.
 
 ---
 
-## Project Structure
+## Project structure
 
-```
+```text
 detcord/
+├── .github/
+│   ├── ISSUE_TEMPLATE/
+│   └── workflows/
+│       ├── ci.yml
+│       └── release.yml
+├── docs/
+│   ├── COMPARISON.md
+│   ├── FEATURE_ROADMAP.md
+│   └── RELEASE_RUNBOOK.md
+├── scripts/
 ├── src/
-│   ├── core/                    # Core business logic
-│   │   ├── index.ts             # Core module exports
-│   │   ├── discord-api.ts       # Discord API client
-│   │   ├── discord-api.test.ts  # API client tests
-│   │   ├── token.ts             # Token extraction utilities
-│   │   ├── token.test.ts        # Token extraction tests
-│   │   ├── deletion-engine.ts   # Orchestrates bulk deletion
-│   │   ├── deletion-engine.test.ts # Deletion engine tests
-│   │   ├── persistence.ts       # Session persistence utilities
-│   │   ├── persistence.test.ts  # Persistence tests
-│   │   └── types.ts             # Shared type definitions
-│   ├── ui/                      # User interface layer
-│   │   ├── index.ts             # UI module exports
-│   │   ├── controller.ts        # Main UI controller (wizard interface)
-│   │   ├── controller.test.ts   # Controller tests
-│   │   ├── templates.ts         # DOM element creation
-│   │   ├── templates.test.ts    # Template tests
-│   │   ├── effects.ts           # Visual effects (confetti, countdown)
-│   │   ├── effects.test.ts      # Effects tests
-│   │   └── styles.ts            # CSS styles
-│   ├── utils/                   # Utility functions
-│   │   ├── index.ts             # Utils module exports
-│   │   ├── helpers.ts           # General helpers (snowflake, formatting)
-│   │   ├── helpers.test.ts      # Helper tests
-│   │   ├── validators.ts        # Input validation utilities
-│   │   ├── validators.test.ts   # Validator tests
-│   │   ├── performance.ts       # Performance optimization utilities
-│   │   └── performance.test.ts  # Performance utility tests
-│   ├── index.ts                 # Entry point with auto-initialization
-│   └── index.test.ts            # Entry point tests
-├── dist/                        # Build output
-│   └── detcord.user.js          # Generated userscript
-├── biome.json                   # Biome linter/formatter config
-├── tsconfig.json                # TypeScript configuration
-├── vite.config.ts               # Vite build configuration
-├── vitest.config.ts             # Vitest test configuration
-├── package.json                 # Project dependencies
-├── CONTRIBUTING.md              # Contribution guidelines
-├── SECURITY.md                  # Security policy
-├── CHANGELOG.md                 # Version history
-└── LICENSE                      # MIT License
+│   ├── core/
+│   │   ├── deletion-engine.ts
+│   │   ├── discord-api.ts
+│   │   ├── errors.ts
+│   │   ├── persistence.ts
+│   │   ├── storage.ts
+│   │   └── token.ts
+│   ├── ui/
+│   │   ├── controller.ts
+│   │   ├── wizard.ts
+│   │   ├── run-config.ts
+│   │   ├── runner.ts
+│   │   ├── progress-view.ts
+│   │   ├── channel-picker.ts
+│   │   └── window-markup.ts
+│   ├── utils/
+│   │   ├── helpers.ts
+│   │   ├── performance.ts
+│   │   └── validators.ts
+│   └── index.ts
+├── dist/
+│   └── detcord.user.js
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── SECURITY.md
+└── package.json
 ```
+
+Tests are co-located with their source files.
+
+The `src/ui/` controller is being split into the target modules shown above: `controller.ts`, `wizard.ts`, `run-config.ts`, `runner.ts`, `progress-view.ts`, `channel-picker.ts`, and `window-markup.ts`. Parallel work may temporarily use different names; the orchestrator will reconcile names at merge.
 
 ---
 
 ## Architecture
 
-### Module Overview
+### Core modules
 
-#### Core Modules (`src/core/`)
+#### `discord-api.ts`
 
-**`discord-api.ts`** - Discord API Client
-- Provides `DiscordApiClient` class for authenticated API requests
-- Handles message search via `/api/v10/guilds/{id}/messages/search` and `/api/v10/channels/{id}/messages/search`
-- Handles message deletion via `DELETE /api/v10/channels/{id}/messages/{id}`
-- Extracts and tracks rate limit headers (`X-RateLimit-*`)
-- Returns structured error types for different failure modes
+`DiscordApiClient` owns authenticated requests to Discord:
 
-**`token.ts`** - Token Extraction
-- `getToken()` - Primary method, tries all extraction strategies
-- `getTokenFromLocalStorage()` - Extracts token via iframe localStorage access
-- `getTokenFromWebpack()` - Extracts token via webpack module introspection
-- `getAuthorId()` - Gets current user's ID for filtering
-- `getGuildIdFromUrl()` / `getChannelIdFromUrl()` - URL parsing utilities
+- Search through guild or channel message-search endpoints.
+- Delete through the channel message endpoint.
+- Resolve the current account through `/users/@me`.
+- Load guild channels for target selection.
+- Capture rate-limit headers for proactive pacing.
+- Convert every API failure into `DiscordApiError`.
 
-**`deletion-engine.ts`** - Deletion Orchestration
-- `DeletionEngine` class manages the full deletion lifecycle
-- Configurable via `configure()` with filter options
-- Event callbacks via `setCallbacks()` for progress updates
-- State machine: idle -> running -> (paused) -> stopped
-- Handles pagination, retries, and rate limit backoff
-- Filters messages by type, content pattern, and pinned status
+Repeated search `has` filters are encoded by calling `URLSearchParams.append` once per value.
 
-**`types.ts`** - Type Definitions
-- Discord API response types (`DiscordMessage`, `SearchResponse`, etc.)
-- Engine configuration types (`DeletionOptions`, `DeletionState`, etc.)
-- Callback signatures for lifecycle events
+#### `errors.ts`
 
-**`persistence.ts`** - Session Persistence
-- `saveProgress()` / `loadProgress()` - Persist deletion progress
-- 24-hour expiry for saved sessions
-- Runtime validation of saved data
-- Corruption detection and cleanup
+`DiscordApiError` is the only API failure shape used by the client and engine. Its codes are:
 
-#### UI Modules (`src/ui/`)
+- `RATE_LIMITED`
+- `INDEXING`
+- `UNAUTHORIZED`
+- `FORBIDDEN`
+- `NOT_FOUND`
+- `NETWORK_ERROR`
+- `SERVER_ERROR`
+- `UNKNOWN`
 
-**`controller.ts`** - Main UI Controller
-- `DetcordUI` class manages the wizard interface
-- Multi-screen flow (main menu → target → filters → preview → deletion)
-- Progress tracking with real-time updates
-- Pause/resume/stop controls
-- Event-driven with callbacks for engine integration
+It carries HTTP status, retry delay, global-rate-limit state, Discord error code, and an optional cause. `RATE_LIMITED`, `INDEXING`, `NETWORK_ERROR`, and `SERVER_ERROR` are retryable. Discord code 50083 identifies an archived thread.
 
-**`templates.ts`** - DOM Element Creation
-- Creates all UI elements (buttons, inputs, modals)
-- Preview screen rendering
-- Status message templates
-- Uses `escapeHtml()` for XSS prevention
+#### `deletion-engine.ts`
 
-**`effects.ts`** - Visual Effects
-- Confetti animation on completion
-- Countdown sequence (3-2-1-BOOM)
-- Status message rotator with humorous messages
-- Shake and flash animations
+`DeletionEngine` owns preview, deletion, cursor movement, pause, Stop, retries, persistence checkpoints, and outcome counters.
 
-**`styles.ts`** - CSS Styles
-- Comprehensive CSS for wizard UI
-- Dark theme optimized for Discord
-- Responsive design for various screen sizes
+The engine reports each message as `deleted`, `already_gone`, `skipped`, or `failed`. Completion reports whether the run completed, was stopped, or ended in an error.
 
-#### Utility Modules (`src/utils/`)
+#### `storage.ts`
 
-**`helpers.ts`** - General Utilities
-- `dateToSnowflake()` / `snowflakeToDate()` - Discord snowflake ID conversion
-- `formatDuration()` - Human-readable time formatting
-- `escapeHtml()` - XSS prevention for UI rendering
-- `buildQueryString()` - URL query parameter encoding
-- `delay()` - Promise-based sleep
-- `clamp()` - Numeric value clamping
+Discord removes `window.localStorage` from its own page. `getPageStorage()` must:
 
-**`performance.ts`** - Performance Utilities
-- `throttle()` / `debounce()` - Rate limiting for functions
-- `createBatchUpdater()` - Batched DOM updates via requestAnimationFrame
-- `createBoundedArray()` - Fixed-size arrays to prevent memory leaks
-- `createCleanupManager()` - Resource cleanup tracking
-- `appendMany()` / `trimChildren()` - Efficient DOM manipulation
-- `createOptimizedObserver()` - Throttled MutationObserver wrapper
+1. Use `window.localStorage` when it is available and usable.
+2. Otherwise create a hidden same-origin iframe and use the frame's storage.
+3. Return `null` if neither store is available.
+4. Cache the resolved storage until `resetPageStorage()` removes the cache and iframe.
 
-**`validators.ts`** - Input Validation
-- `validateRegex()` - Regex pattern validation (prevents ReDoS)
-- `isValidSnowflake()` - Discord snowflake ID validation
-- `isValidTokenFormat()` - Token format checking
-- `sanitizeId()` - ID sanitization for API requests
+Only progress is stored. Tokens must never be written to either storage path.
 
-### Data Flow
+#### `persistence.ts`
 
+Persistence uses schema version 2 and the key:
+
+```text
+detcord_progress:v2:<authorId>:<targetKey>
 ```
-User Action
-    │
-    ▼
-┌─────────────────┐
-│   UI Layer      │  (src/ui/)
-│   - Wizard UI   │
-│   - Progress UI │
-│   - Effects     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ DeletionEngine  │
-│   - configure() │
-│   - start()     │
-│   - pause()     │
-│   - stop()      │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ DiscordApiClient│
-│   - search()    │
-│   - delete()    │
-└────────┬────────┘
-         │
-         ▼
-   Discord API
+
+The target key is derived from the guild or channel target. Records include the author, target, deletion order, monotonic cursor, counters, timestamp, and active filters.
+
+Progress is saved every 10 deletions and on Stop. Records expire after 24 hours. Resume selects the newest valid record for the current author. Legacy `detcord_progress` version 1 data is deleted when encountered.
+
+#### `token.ts`
+
+Token extraction is webpack-first. It must not dispatch synthetic browser events, log a token, or persist a token. A manual token is not trusted until `getCurrentUser()` binds it to the Discord account that supplied it.
+
+### UI modules
+
+The UI owns the target, filter, review, countdown, progress, resume, completion, and error screens. It translates user selections into one immutable run configuration, then passes that configuration to preview and deletion.
+
+Important invariants:
+
+- Preview and deletion use the same target and filters.
+- Confirmation remains disabled until preview succeeds.
+- Specific mode preserves every selected channel.
+- A second click cannot start a second run.
+- Closing the window cancels the countdown.
+- Stop interrupts engine waits and persists the resumable state.
+- Failed and skipped outcomes are never rendered as successful deletions.
+- Oldest-first controls remain hidden until that mode is redesigned.
+
+### Utility modules
+
+- `helpers.ts`: snowflake conversion, formatting, escaping, query construction, delays, and clamps.
+- `performance.ts`: throttling, batching, bounded collections, observer control, and cleanup.
+- `validators.ts`: snowflake, token, and regular-expression validation.
+
+### Data flow
+
+```text
+User action
+    |
+    v
+UI wizard and preview
+    |
+    v
+DeletionEngine
+    |
+    v
+DiscordApiClient
+    |
+    v
+Discord API
 ```
 
 ---
 
-## Build Instructions
+## Cursor and pagination rules
+
+Newest-first deletion uses a monotonic `max_id` cursor. It does not page by search offset.
+
+After each batch, move `max_id` strictly older than the oldest message considered in that batch. The cursor must advance even when messages are pinned, filtered out, already gone, forbidden, or otherwise not deleted. Retrying a search must preserve every configured filter.
+
+This design avoids Discord's shifting search index and prevents the same newest page from being returned indefinitely. Do not reintroduce offset paging for newest-first runs.
+
+Oldest-first mode is hidden pending redesign. Code that remains for discovery must propagate typed errors and respond to Stop.
+
+---
+
+## Error and rate-limit rules
+
+Every failed request must throw `DiscordApiError`.
+
+- **429**: Retry after Discord's `retry_after`. Prefer JSON, then `X-RateLimit-Reset-After`, then `Retry-After`.
+- **202 search response**: Treat as `INDEXING`, wait, and retry.
+- **401**: Stop the run with an authentication error.
+- **403**: Skip the message and report the reason. Code 50083 is an archived thread.
+- **404 delete response**: Return `already_gone`.
+- **Fetch rejection**: Throw `NETWORK_ERROR` with the original cause.
+- **5xx**: Throw `SERVER_ERROR`; the engine may retry it.
+
+When `X-RateLimit-Remaining` reaches zero, wait for the reset before issuing another request.
+
+Deletion pacing starts at 1 second. A throttle adds 50% of the observed gap to the delay. After five clean deletions, reduce the current delay by 10%. Search pacing remains 10 seconds by default.
+
+Empty search pages use a 1.3 multiplier for five retries: 10 seconds, 13 seconds, 16.9 seconds, 22 seconds, and 28.6 seconds. Stop must abort these waits promptly through an `AbortController`.
+
+---
+
+## Build instructions
 
 ### Prerequisites
 
-- Node.js 18 or later
-- npm (comes with Node.js)
+- Node.js 22.12 or later
+- Node.js 24 recommended and used in CI
+- npm
 
-### Development Setup
+### Setup
 
 ```bash
-# Clone the repository
-git clone https://github.com/welshwandering/detcord.git
+git clone https://github.com/canaryframe/detcord.git
 cd detcord
-
-# Install dependencies
 npm install
-
-# Run linter
+npm run typecheck
 npm run lint
-
-# Run tests
 npm run test
+```
 
-# Type checking
+### Commands
+
+```bash
+npm run dev
+npm run build
+npm run build:userscript
+npm run test
+npm run test:watch
+npm run test:coverage
+npm run lint
+npm run lint:fix
+npm run format
 npm run typecheck
 ```
 
-### Build Commands
-
-```bash
-# Development build (ES modules + IIFE, with sourcemaps)
-npm run build
-
-# Userscript build (single IIFE file with userscript header)
-npm run build:userscript
-
-# Development server (for local testing)
-npm run dev
-```
-
-### Output
-
-- `dist/detcord.user.js` - Userscript for installation in Tampermonkey/etc.
-- `dist/detcord.es.js` - ES module build (development)
-- `dist/detcord.iife.js` - IIFE build (development)
+The installable output is `dist/detcord.user.js`.
 
 ---
 
 ## Testing
 
-### Test Framework
+Tests use Vitest 5 with jsdom 30. CI runs tests on every pull request and reports coverage.
 
-Tests use [Vitest](https://vitest.dev/) with jsdom for browser API simulation.
+### Conventions
 
-### Running Tests
+- Co-locate `*.test.ts` with the module under test.
+- Stub `fetch`; never call Discord from a test.
+- Do not mock response or error shapes that `DiscordApiClient` cannot produce.
+- Throw real `DiscordApiError` instances from API-client doubles.
+- Cover cancellation during waits, not only cancellation between requests.
+- Use fake timers for pacing tests and restore them after each test.
+- Reset page-storage caches and remove iframe fixtures between tests.
+- Assert that retry paths preserve target and filter options.
+- Add a regression test that fails against the previous behaviour for every fix.
 
-```bash
-# Run all tests once
-npm run test
-
-# Watch mode (re-run on file changes)
-npm run test:watch
-
-# With coverage report
-npm run test:coverage
-```
-
-### Test Structure
-
-Tests are co-located with their source files:
-- `src/index.test.ts`
-- `src/core/discord-api.test.ts`
-- `src/core/token.test.ts`
-- `src/core/deletion-engine.test.ts`
-- `src/core/persistence.test.ts`
-- `src/ui/controller.test.ts`
-- `src/ui/templates.test.ts`
-- `src/ui/effects.test.ts`
-- `src/utils/helpers.test.ts`
-- `src/utils/validators.test.ts`
-- `src/utils/performance.test.ts`
-
-### Coverage Requirements
-
-Target: **>80% code coverage**
-
-Coverage is measured using V8 coverage via `@vitest/coverage-v8`.
-
-### Writing Tests
-
-```typescript
-import { describe, it, expect, vi } from 'vitest';
-import { myFunction } from './my-module';
-
-describe('myFunction', () => {
-    it('should handle normal input', () => {
-        expect(myFunction('test')).toBe('expected');
-    });
-
-    it('should throw on invalid input', () => {
-        expect(() => myFunction(null)).toThrow();
-    });
-});
-```
-
----
-
-## Code Style
-
-### Language and Tooling
-
-- **TypeScript** in strict mode
-- **Biome** for linting and formatting
-- **Tabs** for indentation (2-space width)
-- **Single quotes** for strings
-- **Semicolons** required
-
-### Biome Configuration
-
-Key rules enforced:
-- `noExplicitAny: error` - No `any` types allowed
-- `useConst: error` - Use `const` for non-reassigned variables
-- `noExcessiveCognitiveComplexity: warn` - Max complexity of 15
-
-### Running Linter
+Run the complete validation set before review:
 
 ```bash
-# Check for issues
+npm run typecheck
 npm run lint
-
-# Auto-fix issues
-npm run lint:fix
-
-# Format only
-npm run format
+npx vitest run --coverage
+npm run build:userscript
 ```
 
-### Code Conventions
+---
 
-1. **Use descriptive names** - Avoid abbreviations
-2. **Document public APIs** - JSDoc comments for exported functions
-3. **Handle errors explicitly** - No swallowed exceptions
-4. **Avoid magic numbers** - Use named constants
-5. **Keep functions focused** - Single responsibility principle
+## Code style
+
+- TypeScript 7 in strict mode
+- `exactOptionalPropertyTypes` enabled
+- `noUncheckedIndexedAccess` enabled
+- Biome 2.5 for formatting and linting
+- Two spaces for indentation
+- Single quotes
+- Semicolons
+- No explicit `any`
+- JSDoc on exported functions
+- Cognitive complexity no higher than 15
+
+Prefer shared helpers and typed guards over assertions. Surface errors through the existing callback and UI patterns rather than swallowing them.
 
 ---
 
-## Performance Considerations
+## Performance considerations
 
-### Browser Performance
+### Browser work
 
-The userscript runs inside Discord's web app, which is already resource-intensive. Performance is critical.
+- Batch DOM updates.
+- Keep progress feeds bounded.
+- Clean up listeners, observers, animation frames, timers, and iframes.
+- Avoid retaining message bodies after they are no longer needed.
+- Keep the main thread responsive during large runs.
 
-1. **Minimize DOM operations**
-   - Batch updates using `createBatchUpdater()`
-   - Use DocumentFragment for multiple insertions
-   - Avoid layout thrashing (read-then-write pattern)
+Chromium throttles timers in tabs hidden for more than five minutes. This is a browser limitation; background runs continue more slowly.
 
-2. **Memory management**
-   - Use `createBoundedArray()` for log entries
-   - Clean up event listeners with `createCleanupManager()`
-   - Avoid closures that capture large objects
+### API work
 
-3. **Throttle expensive operations**
-   - UI updates: throttle to ~60fps maximum
-   - Log rendering: batch append, trim old entries
-   - Progress callbacks: throttle to prevent UI jank
-
-4. **Async operation management**
-   - Never block the main thread
-   - Use `requestAnimationFrame` for visual updates
-   - Respect rate limits to avoid API throttling
-
-### API Performance
-
-1. **Respect rate limits**
-   - Default 10 second delay between search requests
-   - Default 1 second delay between delete requests
-   - Honor `X-RateLimit-Reset-After` header
-   - Exponential backoff on 429 responses
-
-2. **Minimize requests**
-   - Fetch full pages (25 messages per search)
-   - Filter client-side when possible
-   - Stop early if no more results
+- Fetch full search pages.
+- Filter locally only when Discord cannot express the filter.
+- Keep the newest-first cursor monotonic.
+- Honour proactive and reactive rate-limit waits.
+- Stop promptly when the user requests it.
 
 ---
 
-## Security Considerations
+## Security considerations
 
-See [SECURITY.md](SECURITY.md) for the full security policy.
+See [SECURITY.md](SECURITY.md).
 
-### Key Security Requirements
+### Required controls
 
-1. **Token handling**
-   - Never log tokens to console
-   - Never store tokens persistently
-   - Never transmit tokens to third parties
-   - Mask tokens in any UI display
-
-2. **User input**
-   - Escape all HTML to prevent XSS (`escapeHtml()`)
-   - Validate regex patterns to prevent ReDoS
-   - Sanitize IDs before use in API requests
-
-3. **API requests**
-   - Only make requests to `discord.com`
-   - Verify response types before processing
-   - Handle errors gracefully without exposing internals
+1. Never log, persist, or display a full token.
+2. Never send a token or Discord content to a third party.
+3. Bind manual tokens to `/users/@me`.
+4. Verify message ownership immediately before deletion.
+5. Escape user-controlled content.
+6. Validate every regex entry path with `validateRegex`.
+7. Validate saved progress before restoring it.
+8. Require a successful preview before confirmation.
+9. Cancel delayed actions when their UI is closed.
 
 ---
 
 ## Contributing
 
-### Pull Request Process
+Follow [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Use GitHub Issues for questions and proposals; Discussions is disabled.
 
-1. Fork the repository
-2. Create a feature branch
-3. Write tests for new functionality
-4. Ensure all tests pass with >80% coverage
-5. Run the linter and fix all issues
-6. Submit a Pull Request
-
-### Commit Messages
-
-Use conventional commit format:
-
-```
-type(scope): description
-
-[optional body]
-```
-
-Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
+Commit messages follow Conventional Commits and are checked in CI.
 
 ---
 
 ## Debugging
 
-### Development Mode
+### Token extraction
 
-Run `npm run dev` to start a development server with hot reload.
+- Confirm Discord's webpack chunk and token-manager shape.
+- Confirm no token reaches logs or storage.
+- Verify manual entry through `/users/@me`.
 
-### Browser DevTools
+### Rate limiting
 
-1. Open Discord in your browser
-2. Open DevTools (F12)
-3. The userscript will log to console with `[Detcord]` prefix
+- Inspect the typed error code and retry source.
+- Check `X-RateLimit-Remaining`, reset timing, and global scope.
+- Confirm the adaptive delay changes only at the defined thresholds.
 
-### Common Issues
+### Search loops
 
-**Token extraction fails:**
-- Check if Discord's localStorage structure has changed
-- Verify webpack chunk name (`webpackChunkdiscord_app`)
+- Record successive `max_id` values.
+- Confirm each cursor is strictly older.
+- Check that pinned, filtered, skipped, and failed messages still advance the cursor.
 
-**Rate limiting:**
-- Increase delay values in configuration
-- Check for 429 response handling
+### Resume
 
-**Messages not found:**
-- Verify author ID matches current user
-- Check if search index is stale (202 response)
+- Check the version 2 key, author ID, target key, expiry, filters, cursor, and counters.
+- Confirm a resumed `start()` preserves restored counters instead of resetting them.
 
 ---
 
-## Release Process
+## Release process
 
-1. Update version in `package.json`
-2. Update `CHANGELOG.md`
-3. Run full test suite
-4. Build userscript: `npm run build:userscript`
-5. Create GitHub release with `dist/detcord.user.js`
+Releases are tag-driven.
+
+1. Update `CHANGELOG.md`.
+2. Run the full validation set.
+3. Run signed `npm version patch`, `npm version minor`, or `npm version major`.
+4. Push the version commit and tag.
+5. CI runs lint, type checking, tests, coverage, and the userscript build.
+6. The release job uploads `detcord.user.js` and fails if the asset is missing.
+7. Verify the permanent download URL after publication.
+
+See [docs/RELEASE_RUNBOOK.md](docs/RELEASE_RUNBOOK.md) for commands, hotfixes, and immutable-release recovery.
 
 ---
 
 ## Resources
 
-- [Discord API Documentation](https://discord.com/developers/docs)
-- [Tampermonkey Documentation](https://www.tampermonkey.net/documentation.php)
-- [Vite Documentation](https://vitejs.dev/)
-- [Vitest Documentation](https://vitest.dev/)
-- [Biome Documentation](https://biomejs.dev/)
-- [TypeScript Documentation](https://www.typescriptlang.org/docs/)
+- [Discord API documentation](https://discord.com/developers/docs)
+- [Tampermonkey documentation](https://www.tampermonkey.net/documentation.php)
+- [Vite documentation](https://vite.dev/)
+- [Vitest documentation](https://vitest.dev/)
+- [Biome documentation](https://biomejs.dev/)
+- [TypeScript documentation](https://www.typescriptlang.org/docs/)

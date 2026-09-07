@@ -1,114 +1,140 @@
-# Release Runbook
+# Release runbook
 
-This document describes the release process for Detcord.
+Detcord releases are tag-driven. A version tag starts CI; the release job publishes the matching userscript only after validation and asset checks succeed.
 
-## Automated Releases
+## Prerequisites
 
-Releases are automatically created when changes are merged to `main` (excluding documentation-only changes).
+- Maintainer access to `canaryframe/detcord`
+- A clean, up-to-date `main` branch
+- Node.js 22.12 or later; Node.js 24 recommended
+- npm
+- GitHub CLI authenticated as a maintainer
+- Working commit and tag signing
 
-The GitHub Actions workflow (`release.yml`) will:
-1. Run all tests
-2. Build the userscript
-3. Create a GitHub release with the version from `package.json`
-4. Attach `detcord.user.js` as a release asset
+`npm version` creates a version commit and tag. Configure Git and npm so both are signed before starting:
 
-## Manual Release Process
+```bash
+git config commit.gpgSign true
+npm config set sign-git-tag true
+```
 
-If you need to create a release manually:
+If signing fails, stop. Do not publish an unsigned version commit or tag.
 
-### Prerequisites
-- Write access to the repository
-- Node.js 18+ installed
-- GitHub CLI (`gh`) installed and authenticated
+## Standard release
 
-### Steps
+### 1. Prepare the changelog
 
-1. **Update version in package.json**
-   ```bash
-   npm version patch  # or minor/major
-   ```
+Move the relevant entries from `Unreleased` to the release version and date. Confirm that user-visible changes, security changes, removals, and known limitations are represented.
 
-2. **Update CHANGELOG.md**
-   - Add a new section for the version
-   - Document all notable changes
+### 2. Validate the release candidate
 
-3. **Create a PR for the version bump**
-   ```bash
-   git checkout -b release/v1.x.x
-   git add package.json package-lock.json CHANGELOG.md
-   git commit -m "chore: bump version to 1.x.x"
-   git push -u origin release/v1.x.x
-   gh pr create --title "Release v1.x.x" --body "Version bump for release"
-   ```
+```bash
+npm ci
+npm run typecheck
+npm run lint
+npx vitest run --coverage
+npm run build:userscript
+test -s dist/detcord.user.js
+```
 
-4. **Merge the PR**
-   - Wait for CI to pass
-   - Get approval if required
-   - Merge to main
+Install `dist/detcord.user.js` in a clean userscript-manager profile and check the target, preview, confirmation, Stop, and completion flow.
 
-5. **Verify release was created**
-   - Check [Releases](https://github.com/welshwandering/detcord/releases)
-   - Verify the userscript is attached
-   - Test installation in a fresh browser
+### 3. Create the signed version commit and tag
 
-### Versioning
+Choose the Semantic Versioning increment:
 
-We follow [Semantic Versioning](https://semver.org/):
+```bash
+npm version minor
+```
 
-- **MAJOR** (1.0.0 -> 2.0.0): Breaking changes
-- **MINOR** (1.0.0 -> 1.1.0): New features, backwards compatible
-- **PATCH** (1.0.0 -> 1.0.1): Bug fixes, backwards compatible
+Use `npm version patch` for a backwards-compatible fix or `npm version major` for a breaking release.
 
-### Hotfix Process
+Inspect the generated version and tag:
 
-For urgent fixes:
+```bash
+git --no-pager show --stat --oneline HEAD
+git tag --points-at HEAD
+git verify-commit HEAD
+version=$(node -p "'v' + require('./package.json').version")
+git tag -v "$version"
+```
 
-1. Create a hotfix branch from `main`
-   ```bash
-   git checkout main && git pull
-   git checkout -b hotfix/issue-description
-   ```
+### 4. Push the commit and tag
 
-2. Make the fix, update version (patch bump)
+```bash
+git push origin main --follow-tags
+```
 
-3. Create PR with `hotfix` label
+The tag, not an ordinary branch push, starts the release process.
 
-4. Fast-track review and merge
+### 5. Watch CI
 
-### Rollback Process
+The tag workflow must complete these stages:
 
-If a release has critical issues:
+1. Install with `npm ci` on Node.js 24.
+2. Run Biome.
+3. Run TypeScript checking.
+4. Run Vitest with coverage.
+5. Build `dist/detcord.user.js`.
+6. Verify that the asset exists and is not empty.
+7. Create the GitHub release for the tag.
+8. Upload `detcord.user.js`.
+9. Verify that the release contains the asset.
 
-1. Create a revert PR
-   ```bash
-   git revert HEAD
-   git push -u origin revert-release
-   gh pr create --title "Revert: v1.x.x" --body "Reverting due to critical issue"
-   ```
+The release job must fail rather than publish a release without `detcord.user.js`.
 
-2. Merge quickly
+### 6. Check the published release
 
-3. Delete the problematic release from GitHub
+Confirm the release and permanent download URL:
 
-4. Investigate and fix the issue in a new PR
+```bash
+version=$(node -p "'v' + require('./package.json').version")
+gh release view "$version"
+curl --fail --location --output /tmp/detcord.user.js \
+  https://github.com/canaryframe/detcord/releases/latest/download/detcord.user.js
+test -s /tmp/detcord.user.js
+```
 
-## Release Checklist
+Open the downloaded file and confirm that its userscript banner contains the released version. Perform a fresh install through the permanent URL.
 
-Before any release:
+## Hotfix
 
-- [ ] All tests pass (`npm run test`)
-- [ ] TypeScript compiles (`npm run typecheck`)
-- [ ] Lint passes (`npm run lint`)
-- [ ] Build succeeds (`npm run build:userscript`)
-- [ ] CHANGELOG.md updated
-- [ ] Version bumped in package.json
-- [ ] Tested manually in browser
+1. Reproduce and fix the problem from current `main`.
+2. Add a regression test and update the changelog.
+3. Run the full release-candidate validation.
+4. Create a signed patch version with `npm version patch`.
+5. Push the version commit and tag.
+6. Verify the replacement release and permanent download URL.
 
-## Post-Release
+Do not reuse or move an existing release tag.
 
-After a release:
+## Bad release and rollback
 
-1. Verify the release page looks correct
-2. Test fresh installation of the userscript
-3. Monitor GitHub Issues for bug reports
-4. Update documentation if needed
+GitHub immutable releases must not be edited to replace an asset or change release contents. A bad release is superseded by a new version.
+
+1. Open an issue describing the impact and affected version unless the matter is security-sensitive.
+2. Revert or fix the faulty change on `main`.
+3. Add a regression test.
+4. Update the changelog with the affected and replacement versions.
+5. Create a new signed patch version.
+6. Push the new tag and allow CI to publish a new release.
+7. Verify that `/releases/latest/download/detcord.user.js` resolves to the replacement.
+
+Do not delete, retag, or edit the immutable bad release. Its history remains available for diagnosis.
+
+## Versioning
+
+- **Major**: incompatible behaviour or distribution change
+- **Minor**: backwards-compatible feature release
+- **Patch**: backwards-compatible bug or security fix
+
+## Release completion
+
+A release is complete only when:
+
+- The signed version commit and tag are on GitHub.
+- CI, tests, type checking, linting, and build have passed.
+- The GitHub release exists for the tag.
+- `detcord.user.js` is present and non-empty.
+- The permanent download URL returns that asset.
+- A fresh browser installation succeeds.

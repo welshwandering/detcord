@@ -1,30 +1,26 @@
-## Summary
+## Problem
 
-<!-- Brief description of what this PR does -->
+<!-- Describe the user or contributor problem. Link the issue where possible. -->
 
-## Changes
+## Root cause
 
-<!-- List the key changes in this PR -->
+<!-- For a fix, identify the code path and why the old behaviour failed. Remove this section for non-fixes. -->
 
--
+## What changed
 
-## Testing
+<!-- Name the important files, functions, interfaces, and data flows. State what is deliberately out of scope. -->
 
-<!-- How was this tested? -->
+## Validation
 
-- [ ] Tests pass (`npm run test`)
-- [ ] Linting passes (`npm run lint`)
-- [ ] Type checking passes (`npm run typecheck`)
-- [ ] Build succeeds (`npm run build`)
+<!-- List the commands and manual browser cases run. Include a regression test for each fix. -->
 
-## Checklist
+```text
+npm run typecheck
+npm run lint
+npx vitest run --coverage
+npm run build:userscript
+```
 
-- [ ] I have read [CONTRIBUTING.md](../CONTRIBUTING.md)
-- [ ] My code follows the project's code style
-- [ ] I have added tests for new functionality
-- [ ] I have updated documentation if needed
-- [ ] This PR does not introduce security vulnerabilities
+## Related issues
 
-## Related Issues
-
-<!-- Link any related issues: Fixes #123, Closes #456 -->
+<!-- Use Fixes #123 or Closes #123 when this pull request fully resolves an issue. -->
