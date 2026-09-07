@@ -8,7 +8,9 @@ import {
   isValidGuildId,
   isValidSnowflake,
   isValidTokenFormat,
+  MAX_REGEX_SUBJECT_LENGTH,
   maskToken,
+  safeRegexTest,
   validateRegex,
   validateSnowflake,
   validateToken,
@@ -86,13 +88,141 @@ describe('validateRegex', () => {
       expect(result.valid).toBe(false);
     });
 
-    it('should accept safe quantified groups', () => {
-      // Non-overlapping alternation
-      expect(validateRegex('(a|b)+').valid).toBe(true);
+    it.each([
+      ['^(a|aa)+$', 'quantified alternation with a prefix-overlapping branch'],
+      ['^(b|bb)+$', 'the same shape built from another character'],
+      ['(a|ab)*c', 'quantified alternation followed by a literal'],
+      ['(\\w+\\s?)*$', 'quantified group containing quantifiers'],
+      ['(?:x+)+y', 'non-capturing group with a quantified body'],
+      ['(a+){2,}', 'open-ended brace quantifier over a quantified body'],
+      ['((a|b)c)+', 'alternation nested one level inside a repeated group'],
+    ])('should reject %s (%s)', (pattern) => {
+      const result = validateRegex(pattern);
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('performance');
+    });
+
+    it('should reject a quantified alternation quickly rather than by timing out', () => {
+      // The pattern is the reproduction case: matching 38 "a"s against it took
+      // ~690ms before this check existed. Rejection must be structural.
+      const start = performance.now();
+      const result = validateRegex('^(a|aa)+$');
+      const elapsed = performance.now() - start;
+
+      expect(result.valid).toBe(false);
+      expect(elapsed).toBeLessThan(50);
+    });
+
+    it.each([
+      '^(cat|dog)$',
+      '\\bhello\\b',
+      'https?://\\S+',
+      '(foo|bar)\\d{3}',
+    ])('should accept the safe pattern %s', (pattern) => {
+      const result = validateRegex(pattern);
+      expect(result.valid).toBe(true);
+      expect(result.regex).toBeInstanceOf(RegExp);
+    });
+
+    it('should accept safe quantified constructs', () => {
       // Single quantifier
       expect(validateRegex('a+').valid).toBe(true);
-      // Fixed repetition
+      // Fixed repetition of a plain group
       expect(validateRegex('(abc){3}').valid).toBe(true);
+      // Non-capturing group with a plain body
+      expect(validateRegex('(?:abc)+').valid).toBe(true);
+    });
+
+    it('should reject a quantified alternation even when the branches are disjoint', () => {
+      // Changed assertion: `(a|b)+` was previously accepted. Proving that two
+      // branches can never match the same input needs full automata analysis,
+      // so every repeated alternation is now refused. `[ab]+` expresses the
+      // safe intent without backtracking.
+      expect(validateRegex('(a|b)+').valid).toBe(false);
+      expect(validateRegex('[ab]+').valid).toBe(true);
+    });
+
+    it('should treat | inside a character class as a literal', () => {
+      expect(validateRegex('([a|b])+').valid).toBe(true);
+    });
+
+    it('should treat an escaped | as a literal', () => {
+      expect(validateRegex('(a\\|b)+').valid).toBe(true);
+    });
+
+    it('should see through lookaround and named-group prefixes', () => {
+      expect(validateRegex('(?<=foo)(a|b)+').valid).toBe(false);
+      expect(validateRegex('(?<!foo)(x+)+').valid).toBe(false);
+      expect(validateRegex('(?<word>a|b)+').valid).toBe(false);
+      expect(validateRegex('(?=abc)(a+)+').valid).toBe(false);
+    });
+
+    it('should not mistake a group prefix for a quantifier in the body', () => {
+      expect(validateRegex('(?<word>abc)+').valid).toBe(true);
+      expect(validateRegex('(?=abc)def').valid).toBe(true);
+    });
+
+    it('should treat a brace that is not a quantifier as a literal', () => {
+      expect(validateRegex('(a{x})+').valid).toBe(true);
+      expect(validateRegex('(a{2,3})+').valid).toBe(false);
+    });
+
+    it('should handle a character class containing a closing bracket', () => {
+      expect(validateRegex('([\\]a])+').valid).toBe(true);
+      expect(validateRegex('([^a])+').valid).toBe(true);
+    });
+
+    it('should tolerate an unterminated character class', () => {
+      const result = validateRegex('(a[bc)+');
+      expect(result.valid).toBe(false);
+      expect(result.error).toBeDefined();
+    });
+
+    it('should allow an unquantified group containing alternation and quantifiers', () => {
+      expect(validateRegex('(a+|b+)').valid).toBe(true);
+    });
+
+    it('should reject a slow pattern that survives the structural check', () => {
+      // No quantified group, but the derived probe "aaaa…a!" forces the engine
+      // through every split of the run before failing.
+      const result = validateRegex('^a*a*a*a*a*a*b$');
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('too long');
+    });
+  });
+
+  describe('safeRegexTest', () => {
+    it('should match within the length limit', () => {
+      expect(safeRegexTest(/hello/i, 'say hello there')).toBe(true);
+      expect(safeRegexTest(/hello/i, 'nothing here')).toBe(false);
+    });
+
+    it('should truncate the subject to MAX_REGEX_SUBJECT_LENGTH', () => {
+      const text = `${'x'.repeat(MAX_REGEX_SUBJECT_LENGTH)}needle`;
+
+      expect(safeRegexTest(/needle/, text)).toBe(false);
+      expect(/needle/.test(text)).toBe(true);
+    });
+
+    it('should still match content that falls inside the limit', () => {
+      const text = `needle${'x'.repeat(MAX_REGEX_SUBJECT_LENGTH * 2)}`;
+
+      expect(safeRegexTest(/needle/, text)).toBe(true);
+    });
+
+    it('should reset lastIndex so a global regex stays stateless', () => {
+      const regex = /a/g;
+
+      expect(safeRegexTest(regex, 'a')).toBe(true);
+      expect(safeRegexTest(regex, 'a')).toBe(true);
+    });
+
+    it('should return false for non-string input', () => {
+      expect(safeRegexTest(/anything/, null as unknown as string)).toBe(false);
+    });
+
+    it('should expose a bound large enough for any Discord message', () => {
+      expect(MAX_REGEX_SUBJECT_LENGTH).toBe(4000);
     });
   });
 

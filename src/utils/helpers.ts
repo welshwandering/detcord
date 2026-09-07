@@ -148,3 +148,75 @@ export function clamp(value: number, min: number, max: number): number {
 
   return Math.min(Math.max(value, min), max);
 }
+
+/**
+ * Matches the `YYYY-MM-DD` value produced by `<input type="date">`.
+ */
+const LOCAL_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/**
+ * Parses a `YYYY-MM-DD` string into calendar parts, rejecting anything that is
+ * not a real date. `new Date('2024-02-31')` silently rolls over into March, so
+ * the parsed components are checked against the constructed date.
+ *
+ * @param yyyyMmDd - Date string in `YYYY-MM-DD` form
+ * @param hours - Hour to set on the resulting local date
+ * @param minutes - Minute to set on the resulting local date
+ * @param seconds - Second to set on the resulting local date
+ * @param milliseconds - Millisecond to set on the resulting local date
+ * @returns The date in the browser's local time zone
+ * @throws Error when the string is malformed or names a non-existent day
+ */
+function parseLocalDate(
+  yyyyMmDd: string,
+  hours: number,
+  minutes: number,
+  seconds: number,
+  milliseconds: number,
+): Date {
+  const match = typeof yyyyMmDd === 'string' ? LOCAL_DATE_PATTERN.exec(yyyyMmDd.trim()) : null;
+  if (!match) {
+    throw new Error('Invalid date: expected YYYY-MM-DD');
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day, hours, minutes, seconds, milliseconds);
+
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day ||
+    Number.isNaN(date.getTime())
+  ) {
+    throw new Error(`Invalid date: ${yyyyMmDd} is not a real calendar date`);
+  }
+
+  return date;
+}
+
+/**
+ * Convert a `YYYY-MM-DD` string to local midnight on that day.
+ *
+ * Date inputs are naive about time zones; treating them as UTC shifts the
+ * boundary by hours, which silently includes or excludes a day's messages.
+ *
+ * @param yyyyMmDd - Date string in `YYYY-MM-DD` form
+ * @returns Local time 00:00:00.000 on that day
+ * @throws Error when the string is malformed or names a non-existent day
+ */
+export function parseLocalDateStart(yyyyMmDd: string): Date {
+  return parseLocalDate(yyyyMmDd, 0, 0, 0, 0);
+}
+
+/**
+ * Convert a `YYYY-MM-DD` string to the last instant of that local day.
+ *
+ * @param yyyyMmDd - Date string in `YYYY-MM-DD` form
+ * @returns Local time 23:59:59.999 on that day
+ * @throws Error when the string is malformed or names a non-existent day
+ */
+export function parseLocalDateEnd(yyyyMmDd: string): Date {
+  return parseLocalDate(yyyyMmDd, 23, 59, 59, 999);
+}

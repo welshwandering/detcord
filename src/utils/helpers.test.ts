@@ -6,6 +6,8 @@ import {
   delay,
   escapeHtml,
   formatDuration,
+  parseLocalDateEnd,
+  parseLocalDateStart,
   snowflakeToDate,
 } from './helpers';
 
@@ -332,5 +334,82 @@ describe('clamp', () => {
     expect(clamp(5, 5, 5)).toBe(5);
     expect(clamp(0, 5, 5)).toBe(5);
     expect(clamp(10, 5, 5)).toBe(5);
+  });
+});
+
+describe('parseLocalDateStart', () => {
+  it('should return local midnight for the given day', () => {
+    const date = parseLocalDateStart('2024-03-15');
+
+    expect(date.getFullYear()).toBe(2024);
+    expect(date.getMonth()).toBe(2);
+    expect(date.getDate()).toBe(15);
+    expect(date.getHours()).toBe(0);
+    expect(date.getMinutes()).toBe(0);
+    expect(date.getSeconds()).toBe(0);
+    expect(date.getMilliseconds()).toBe(0);
+  });
+
+  it('should interpret the date locally, not as UTC', () => {
+    const date = parseLocalDateStart('2024-03-15');
+
+    // `new Date('2024-03-15')` is parsed as UTC midnight; anywhere off UTC the
+    // two differ, and treating a date input as UTC shifts a day's boundary.
+    const offsetMinutes = date.getTimezoneOffset();
+    expect(date.getTime()).toBe(
+      new Date('2024-03-15T00:00:00.000Z').getTime() + offsetMinutes * 60_000,
+    );
+  });
+
+  it('should accept surrounding whitespace', () => {
+    expect(parseLocalDateStart('  2024-03-15  ').getDate()).toBe(15);
+  });
+
+  it('should handle leap days', () => {
+    expect(parseLocalDateStart('2024-02-29').getMonth()).toBe(1);
+  });
+
+  it('should throw for a malformed string', () => {
+    expect(() => parseLocalDateStart('15/03/2024')).toThrow('expected YYYY-MM-DD');
+    expect(() => parseLocalDateStart('2024-3-15')).toThrow('expected YYYY-MM-DD');
+    expect(() => parseLocalDateStart('')).toThrow('expected YYYY-MM-DD');
+  });
+
+  it('should throw for non-string input', () => {
+    expect(() => parseLocalDateStart(null as unknown as string)).toThrow('expected YYYY-MM-DD');
+    expect(() => parseLocalDateStart(20240315 as unknown as string)).toThrow('expected YYYY-MM-DD');
+  });
+
+  it('should throw for a day that does not exist', () => {
+    expect(() => parseLocalDateStart('2024-02-31')).toThrow('not a real calendar date');
+    expect(() => parseLocalDateStart('2023-02-29')).toThrow('not a real calendar date');
+    expect(() => parseLocalDateStart('2024-13-01')).toThrow('not a real calendar date');
+    expect(() => parseLocalDateStart('2024-00-10')).toThrow('not a real calendar date');
+  });
+});
+
+describe('parseLocalDateEnd', () => {
+  it('should return the last instant of the local day', () => {
+    const date = parseLocalDateEnd('2024-03-15');
+
+    expect(date.getFullYear()).toBe(2024);
+    expect(date.getMonth()).toBe(2);
+    expect(date.getDate()).toBe(15);
+    expect(date.getHours()).toBe(23);
+    expect(date.getMinutes()).toBe(59);
+    expect(date.getSeconds()).toBe(59);
+    expect(date.getMilliseconds()).toBe(999);
+  });
+
+  it('should be exactly one millisecond before the next day starts', () => {
+    const end = parseLocalDateEnd('2024-03-15');
+    const nextStart = parseLocalDateStart('2024-03-16');
+
+    expect(nextStart.getTime() - end.getTime()).toBe(1);
+  });
+
+  it('should throw for invalid input', () => {
+    expect(() => parseLocalDateEnd('not-a-date')).toThrow('expected YYYY-MM-DD');
+    expect(() => parseLocalDateEnd('2024-04-31')).toThrow('not a real calendar date');
   });
 });
