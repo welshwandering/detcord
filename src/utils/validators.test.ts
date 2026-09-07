@@ -113,16 +113,14 @@ describe('validateRegex', () => {
       expect(elapsed).toBeLessThan(50);
     });
 
-    it.each([
-      '^(cat|dog)$',
-      '\\bhello\\b',
-      'https?://\\S+',
-      '(foo|bar)\\d{3}',
-    ])('should accept the safe pattern %s', (pattern) => {
-      const result = validateRegex(pattern);
-      expect(result.valid).toBe(true);
-      expect(result.regex).toBeInstanceOf(RegExp);
-    });
+    it.each(['^(cat|dog)$', '\\bhello\\b', 'https?://\\S+', '(foo|bar)\\d{3}'])(
+      'should accept the safe pattern %s',
+      (pattern) => {
+        const result = validateRegex(pattern);
+        expect(result.valid).toBe(true);
+        expect(result.regex).toBeInstanceOf(RegExp);
+      },
+    );
 
     it('should accept safe quantified constructs', () => {
       // Single quantifier
