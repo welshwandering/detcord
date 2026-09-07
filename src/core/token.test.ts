@@ -1,6 +1,15 @@
+/**
+ * Tests for token and identity extraction.
+ *
+ * Page storage is mocked so these tests exercise the extraction order and the
+ * webpack introspection, not the iframe fallback (covered by storage.test.ts).
+ */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getPageStorage } from './storage';
 import {
   getAuthorId,
+  getAuthorIdFromWebpack,
   getChannelIdFromUrl,
   getGuildIdFromUrl,
   getToken,
@@ -8,21 +17,59 @@ import {
   getTokenFromWebpack,
 } from './token';
 
+vi.mock('./storage', () => ({
+  getPageStorage: vi.fn(),
+  resetPageStorage: vi.fn(),
+}));
+
+const mockedGetPageStorage = vi.mocked(getPageStorage);
+
+/** Installs a fake page storage backed by the supplied entries. */
+function useStorage(entries: Record<string, string> | null): void {
+  if (entries === null) {
+    mockedGetPageStorage.mockReturnValue(null);
+    return;
+  }
+  mockedGetPageStorage.mockReturnValue({
+    getItem: (key: string) => entries[key] ?? null,
+  } as unknown as Storage);
+}
+
+/** Shape of the webpack chunk tuple Detcord pushes. */
+type PushedChunk = [string[], Record<string, unknown>, (require: { c: unknown }) => void];
+
+/**
+ * Installs a fake `webpackChunkdiscord_app` whose `push` immediately runs the
+ * supplied callback against the given module registry.
+ */
+function useWebpack(modules: Record<string, unknown>): { pushed: PushedChunk[] } {
+  const pushed: PushedChunk[] = [];
+  const registry = {
+    push: (chunk: PushedChunk) => {
+      pushed.push(chunk);
+      chunk[2]({ c: modules });
+      return 0;
+    },
+  };
+  (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = registry;
+  return { pushed };
+}
+
+/** Builds a webpack module record exposing the given default export. */
+function moduleWith(defaultExport: unknown): { exports: { default: unknown } } {
+  return { exports: { default: defaultExport } };
+}
+
 describe('token extraction', () => {
   const originalLocation = window.location;
-  const originalDispatchEvent = window.dispatchEvent;
 
   beforeEach(() => {
-    vi.resetAllMocks();
+    vi.clearAllMocks();
+    useStorage({});
   });
 
   afterEach(() => {
-    Object.defineProperty(window, 'location', {
-      value: originalLocation,
-      writable: true,
-    });
-    window.dispatchEvent = originalDispatchEvent;
-    // Clean up webpack mock
+    Object.defineProperty(window, 'location', { value: originalLocation, writable: true });
     (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = undefined;
   });
 
@@ -79,721 +126,231 @@ describe('token extraction', () => {
   });
 
   describe('getTokenFromLocalStorage', () => {
-    it('should extract token from localStorage via iframe', () => {
-      const mockToken = 'test-discord-token-123';
-      const mockRemove = vi.fn();
-      const mockLocalStorage = {
-        getItem: vi.fn().mockReturnValue(JSON.stringify(mockToken)),
-      };
-      const mockIframe = {
-        style: { display: '' },
-        contentWindow: {
-          localStorage: mockLocalStorage,
-        },
-        remove: mockRemove,
-      };
+    it('should read the JSON-encoded token from page storage', () => {
+      useStorage({ token: JSON.stringify('a-discord-token') });
 
-      // Mock document.createElement to return our mock iframe
-      const originalCreateElement = document.createElement.bind(document);
-      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
-        if (tagName === 'iframe') {
-          return mockIframe as unknown as HTMLIFrameElement;
-        }
-        return originalCreateElement(tagName);
-      });
-
-      // Mock document.body.appendChild and removeChild
-      const appendChildSpy = vi
-        .spyOn(document.body, 'appendChild')
-        .mockReturnValue(mockIframe as unknown as HTMLIFrameElement);
-      const removeChildSpy = vi
-        .spyOn(document.body, 'removeChild')
-        .mockReturnValue(mockIframe as unknown as HTMLIFrameElement);
-
-      // Mock dispatchEvent
-      window.dispatchEvent = vi.fn();
-
-      const result = getTokenFromLocalStorage();
-
-      expect(result).toBe(mockToken);
-      expect(mockLocalStorage.getItem).toHaveBeenCalledWith('token');
-      expect(appendChildSpy).toHaveBeenCalled();
-      expect(removeChildSpy).toHaveBeenCalled();
-
-      appendChildSpy.mockRestore();
-      removeChildSpy.mockRestore();
+      expect(getTokenFromLocalStorage()).toBe('a-discord-token');
     });
 
-    it('should return null when localStorage is empty', () => {
-      const mockLocalStorage = {
-        getItem: vi.fn().mockReturnValue(null),
-      };
-      const mockIframe = {
-        style: { display: '' },
-        contentWindow: {
-          localStorage: mockLocalStorage,
-        },
-      };
+    it('should return null when the key is absent', () => {
+      useStorage({});
 
-      const originalCreateElement = document.createElement.bind(document);
-      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
-        if (tagName === 'iframe') {
-          return mockIframe as unknown as HTMLIFrameElement;
-        }
-        return originalCreateElement(tagName);
-      });
-
-      const appendChildSpy = vi
-        .spyOn(document.body, 'appendChild')
-        .mockReturnValue(mockIframe as unknown as HTMLIFrameElement);
-      const removeChildSpy = vi
-        .spyOn(document.body, 'removeChild')
-        .mockReturnValue(mockIframe as unknown as HTMLIFrameElement);
-      window.dispatchEvent = vi.fn();
-
-      const result = getTokenFromLocalStorage();
-
-      expect(result).toBeNull();
-      expect(mockLocalStorage.getItem).toHaveBeenCalledWith('token');
-
-      appendChildSpy.mockRestore();
-      removeChildSpy.mockRestore();
+      expect(getTokenFromLocalStorage()).toBeNull();
     });
 
-    it('should handle JSON parsing errors', () => {
-      const mockLocalStorage = {
-        getItem: vi.fn().mockReturnValue('invalid-json{'),
-      };
-      const mockIframe = {
-        style: { display: '' },
-        contentWindow: {
-          localStorage: mockLocalStorage,
-        },
-      };
+    it('should return null when page storage is unavailable', () => {
+      useStorage(null);
 
-      const originalCreateElement = document.createElement.bind(document);
-      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
-        if (tagName === 'iframe') {
-          return mockIframe as unknown as HTMLIFrameElement;
-        }
-        return originalCreateElement(tagName);
-      });
-
-      const appendChildSpy = vi
-        .spyOn(document.body, 'appendChild')
-        .mockReturnValue(mockIframe as unknown as HTMLIFrameElement);
-      const removeChildSpy = vi
-        .spyOn(document.body, 'removeChild')
-        .mockReturnValue(mockIframe as unknown as HTMLIFrameElement);
-      window.dispatchEvent = vi.fn();
-
-      const result = getTokenFromLocalStorage();
-
-      // Should catch JSON.parse error and return null
-      expect(result).toBeNull();
-
-      appendChildSpy.mockRestore();
-      removeChildSpy.mockRestore();
+      expect(getTokenFromLocalStorage()).toBeNull();
     });
 
-    it('should return null when iframe contentWindow is null', () => {
-      const mockIframe = {
-        style: { display: '' },
-        contentWindow: null,
-      };
+    it('should return null for malformed JSON', () => {
+      useStorage({ token: 'invalid-json{' });
 
-      const originalCreateElement = document.createElement.bind(document);
-      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
-        if (tagName === 'iframe') {
-          return mockIframe as unknown as HTMLIFrameElement;
-        }
-        return originalCreateElement(tagName);
-      });
-
-      const appendChildSpy = vi
-        .spyOn(document.body, 'appendChild')
-        .mockReturnValue(mockIframe as unknown as HTMLIFrameElement);
-      const removeChildSpy = vi
-        .spyOn(document.body, 'removeChild')
-        .mockReturnValue(mockIframe as unknown as HTMLIFrameElement);
-      window.dispatchEvent = vi.fn();
-
-      const result = getTokenFromLocalStorage();
-
-      expect(result).toBeNull();
-      // Should still clean up iframe
-      expect(removeChildSpy).toHaveBeenCalled();
-
-      appendChildSpy.mockRestore();
-      removeChildSpy.mockRestore();
+      expect(getTokenFromLocalStorage()).toBeNull();
     });
 
-    it('should clean up iframe on success', () => {
-      const mockToken = 'cleanup-test-token';
-      const mockLocalStorage = {
-        getItem: vi.fn().mockReturnValue(JSON.stringify(mockToken)),
-      };
-      const mockIframe = {
-        style: { display: '' },
-        contentWindow: {
-          localStorage: mockLocalStorage,
-        },
-      };
+    it('should return null when the stored value is not a string', () => {
+      useStorage({ token: JSON.stringify({ nested: true }) });
 
-      const originalCreateElement = document.createElement.bind(document);
-      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
-        if (tagName === 'iframe') {
-          return mockIframe as unknown as HTMLIFrameElement;
-        }
-        return originalCreateElement(tagName);
-      });
+      expect(getTokenFromLocalStorage()).toBeNull();
+    });
 
-      const removeChildSpy = vi
-        .spyOn(document.body, 'removeChild')
-        .mockReturnValue(mockIframe as unknown as HTMLIFrameElement);
-      vi.spyOn(document.body, 'appendChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-      window.dispatchEvent = vi.fn();
+    it('should return null for an empty stored string', () => {
+      useStorage({ token: JSON.stringify('') });
+
+      expect(getTokenFromLocalStorage()).toBeNull();
+    });
+
+    it('should not dispatch a beforeunload event', () => {
+      const dispatchSpy = vi.spyOn(window, 'dispatchEvent');
+      useStorage({ token: JSON.stringify('a-discord-token') });
 
       getTokenFromLocalStorage();
 
-      expect(removeChildSpy).toHaveBeenCalledWith(mockIframe);
-
-      removeChildSpy.mockRestore();
-    });
-
-    it('should clean up iframe on error', () => {
-      const mockIframe = {
-        style: { display: '' },
-        contentWindow: {
-          localStorage: {
-            getItem: vi.fn().mockImplementation(() => {
-              throw new Error('Storage access denied');
-            }),
-          },
-        },
-      };
-
-      const originalCreateElement = document.createElement.bind(document);
-      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
-        if (tagName === 'iframe') {
-          return mockIframe as unknown as HTMLIFrameElement;
-        }
-        return originalCreateElement(tagName);
-      });
-
-      const removeChildSpy = vi
-        .spyOn(document.body, 'removeChild')
-        .mockReturnValue(mockIframe as unknown as HTMLIFrameElement);
-      vi.spyOn(document.body, 'appendChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-      window.dispatchEvent = vi.fn();
-
-      const result = getTokenFromLocalStorage();
-
-      // Should return null on error
-      expect(result).toBeNull();
-      // Cleanup happens before error is thrown in getItem, so removeChild is called
-      expect(removeChildSpy).toHaveBeenCalled();
-
-      removeChildSpy.mockRestore();
-    });
-
-    it('should return null when iframe cannot be created', () => {
-      // In jsdom, iframe contentWindow may not have localStorage
-      // This tests the error handling path
-      const result = getTokenFromLocalStorage();
-      // Should not throw, should return null gracefully
-      expect(result).toBeNull();
+      expect(dispatchSpy).not.toHaveBeenCalled();
+      dispatchSpy.mockRestore();
     });
   });
 
   describe('getTokenFromWebpack', () => {
-    it('should extract token from webpack modules', () => {
-      const mockToken = 'webpack-extracted-token';
-      const mockModules: Record<string, { exports?: { default?: { getToken?: () => string } } }> = {
-        module1: {
-          exports: {
-            default: {
-              getToken: () => mockToken,
-            },
-          },
-        },
-      };
+    it('should extract the token from the module exposing getToken', () => {
+      useWebpack({
+        1: moduleWith({ unrelated: () => 'nope' }),
+        2: moduleWith({ getToken: () => 'webpack-token' }),
+      });
 
-      // Create a mock webpack chunk that will populate modules when pushed
-      const webpackChunk: unknown[] = [];
-      const originalPush = webpackChunk.push.bind(webpackChunk);
-      webpackChunk.push = (...args: unknown[]) => {
-        const chunk = args[0] as [
-          string[],
-          Record<string, unknown>,
-          (require: { c: Record<string, unknown> }) => void,
-        ];
-        if (chunk?.[2] && typeof chunk[2] === 'function') {
-          // Call the require function with our mock modules
-          chunk[2]({ c: mockModules });
-        }
-        return originalPush(...args);
-      };
-
-      (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = webpackChunk;
-
-      const result = getTokenFromWebpack();
-
-      expect(result).toBe(mockToken);
+      expect(getTokenFromWebpack()).toBe('webpack-token');
     });
 
-    it('should return null when webpack chunk not found', () => {
-      // Ensure webpackChunkdiscord_app does not exist
+    it('should call getToken bound to its default export', () => {
+      const provider = {
+        secret: 'bound-token',
+        getToken(this: { secret: string }) {
+          return this.secret;
+        },
+      };
+      useWebpack({ 1: moduleWith(provider) });
+
+      expect(getTokenFromWebpack()).toBe('bound-token');
+    });
+
+    it('should return null when webpack is not present', () => {
       (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = undefined;
 
-      const result = getTokenFromWebpack();
-
-      expect(result).toBeNull();
+      expect(getTokenFromWebpack()).toBeNull();
     });
 
-    it('should handle missing getToken method', () => {
-      const mockModules: Record<
-        string,
-        { exports?: { default?: { someOtherMethod?: () => string } } }
-      > = {
-        module1: {
-          exports: {
-            default: {
-              someOtherMethod: () => 'not-a-token',
-            },
+    it('should return null when the chunk registry has no push', () => {
+      (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = {};
+
+      expect(getTokenFromWebpack()).toBeNull();
+    });
+
+    it('should return null when no module exposes getToken', () => {
+      useWebpack({ 1: moduleWith({ other: () => 'x' }), 2: { exports: {} }, 3: undefined });
+
+      expect(getTokenFromWebpack()).toBeNull();
+    });
+
+    it('should ignore modules whose exports are not objects', () => {
+      useWebpack({ 1: { exports: 'a string' }, 2: { exports: null } });
+
+      expect(getTokenFromWebpack()).toBeNull();
+    });
+
+    it('should ignore an empty-string token', () => {
+      useWebpack({ 1: moduleWith({ getToken: () => '' }) });
+
+      expect(getTokenFromWebpack()).toBeNull();
+    });
+
+    it('should ignore a non-string token', () => {
+      useWebpack({ 1: moduleWith({ getToken: () => 12345 }) });
+
+      expect(getTokenFromWebpack()).toBeNull();
+    });
+
+    it('should skip a module whose getToken throws', () => {
+      useWebpack({
+        1: moduleWith({
+          getToken: () => {
+            throw new Error('module exploded');
           },
-        },
-      };
+        }),
+        2: moduleWith({ getToken: () => 'later-token' }),
+      });
 
-      const webpackChunk: unknown[] = [];
-      const originalPush = webpackChunk.push.bind(webpackChunk);
-      webpackChunk.push = (...args: unknown[]) => {
-        const chunk = args[0] as [
-          string[],
-          Record<string, unknown>,
-          (require: { c: Record<string, unknown> }) => void,
-        ];
-        if (chunk?.[2] && typeof chunk[2] === 'function') {
-          chunk[2]({ c: mockModules });
-        }
-        return originalPush(...args);
-      };
-
-      (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = webpackChunk;
-
-      const result = getTokenFromWebpack();
-
-      expect(result).toBeNull();
+      expect(getTokenFromWebpack()).toBe('later-token');
     });
 
-    it('should return null when getToken returns empty string', () => {
-      const mockModules: Record<string, { exports?: { default?: { getToken?: () => string } } }> = {
-        module1: {
-          exports: {
-            default: {
-              getToken: () => '',
-            },
-          },
-        },
+    it('should tolerate a registry without a module cache', () => {
+      (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = {
+        push: (chunk: PushedChunk) => chunk[2]({ c: undefined }),
       };
 
-      const webpackChunk: unknown[] = [];
-      const originalPush = webpackChunk.push.bind(webpackChunk);
-      webpackChunk.push = (...args: unknown[]) => {
-        const chunk = args[0] as [
-          string[],
-          Record<string, unknown>,
-          (require: { c: Record<string, unknown> }) => void,
-        ];
-        if (chunk?.[2] && typeof chunk[2] === 'function') {
-          chunk[2]({ c: mockModules });
-        }
-        return originalPush(...args);
-      };
-
-      (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = webpackChunk;
-
-      const result = getTokenFromWebpack();
-
-      expect(result).toBeNull();
+      expect(getTokenFromWebpack()).toBeNull();
     });
 
-    it('should return null when getToken returns non-string', () => {
-      const mockModules: Record<string, { exports?: { default?: { getToken?: () => unknown } } }> =
-        {
-          module1: {
-            exports: {
-              default: {
-                getToken: () => 12345,
-              },
-            },
-          },
-        };
-
-      const webpackChunk: unknown[] = [];
-      const originalPush = webpackChunk.push.bind(webpackChunk);
-      webpackChunk.push = (...args: unknown[]) => {
-        const chunk = args[0] as [
-          string[],
-          Record<string, unknown>,
-          (require: { c: Record<string, unknown> }) => void,
-        ];
-        if (chunk?.[2] && typeof chunk[2] === 'function') {
-          chunk[2]({ c: mockModules });
-        }
-        return originalPush(...args);
-      };
-
-      (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = webpackChunk;
-
-      const result = getTokenFromWebpack();
-
-      expect(result).toBeNull();
-    });
-
-    it('should handle null modules', () => {
-      const mockModules: Record<string, null> = {
-        module1: null,
-      };
-
-      const webpackChunk: unknown[] = [];
-      const originalPush = webpackChunk.push.bind(webpackChunk);
-      webpackChunk.push = (...args: unknown[]) => {
-        const chunk = args[0] as [
-          string[],
-          Record<string, unknown>,
-          (require: { c: Record<string, unknown> }) => void,
-        ];
-        if (chunk?.[2] && typeof chunk[2] === 'function') {
-          chunk[2]({ c: mockModules });
-        }
-        return originalPush(...args);
-      };
-
-      (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = webpackChunk;
-
-      const result = getTokenFromWebpack();
-
-      expect(result).toBeNull();
-    });
-
-    it('should handle webpack errors gracefully', () => {
-      // Set up a webpack chunk that throws an error
-      const webpackChunk = {
+    it('should return null when push itself throws', () => {
+      (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = {
         push: () => {
-          throw new Error('Webpack error');
+          throw new Error('webpack rejected the chunk');
         },
       };
 
-      (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = webpackChunk;
-
-      const result = getTokenFromWebpack();
-
-      expect(result).toBeNull();
+      expect(getTokenFromWebpack()).toBeNull();
     });
 
-    it('should find token among multiple modules', () => {
-      const mockToken = 'found-in-third-module';
-      const mockModules: Record<string, { exports?: { default?: { getToken?: () => string } } }> = {
-        module1: { exports: {} },
-        module2: { exports: { default: {} } },
-        module3: {
-          exports: {
-            default: {
-              getToken: () => mockToken,
-            },
-          },
-        },
-      };
+    it('should use a different chunk id on every call', () => {
+      const { pushed } = useWebpack({ 1: moduleWith({ getToken: () => 'tok' }) });
 
-      const webpackChunk: unknown[] = [];
-      const originalPush = webpackChunk.push.bind(webpackChunk);
-      webpackChunk.push = (...args: unknown[]) => {
-        const chunk = args[0] as [
-          string[],
-          Record<string, unknown>,
-          (require: { c: Record<string, unknown> }) => void,
-        ];
-        if (chunk?.[2] && typeof chunk[2] === 'function') {
-          chunk[2]({ c: mockModules });
-        }
-        return originalPush(...args);
-      };
+      getTokenFromWebpack();
+      getTokenFromWebpack();
 
-      (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = webpackChunk;
+      expect(pushed).toHaveLength(2);
+      const [first, second] = pushed.map((chunk) => chunk[0][0]);
+      expect(first).not.toBe(second);
+      expect(first).toMatch(/^detcord-token-extractor-/);
+    });
+  });
 
-      const result = getTokenFromWebpack();
+  describe('getAuthorIdFromWebpack', () => {
+    it('should read the id from getCurrentUser', () => {
+      useWebpack({
+        1: moduleWith({ getToken: () => 'tok' }),
+        2: moduleWith({ getCurrentUser: () => ({ id: '456789012345678901' }) }),
+      });
 
-      expect(result).toBe(mockToken);
+      expect(getAuthorIdFromWebpack()).toBe('456789012345678901');
+    });
+
+    it('should return null when getCurrentUser returns no user', () => {
+      useWebpack({ 1: moduleWith({ getCurrentUser: () => null }) });
+
+      expect(getAuthorIdFromWebpack()).toBeNull();
+    });
+
+    it('should return null when the user has no string id', () => {
+      useWebpack({ 1: moduleWith({ getCurrentUser: () => ({ id: 123 }) }) });
+
+      expect(getAuthorIdFromWebpack()).toBeNull();
+    });
+
+    it('should return null when no module exposes getCurrentUser', () => {
+      useWebpack({ 1: moduleWith({ getToken: () => 'tok' }) });
+
+      expect(getAuthorIdFromWebpack()).toBeNull();
     });
   });
 
   describe('getAuthorId', () => {
-    it('should extract user ID from localStorage', () => {
-      const mockUserId = '123456789012345678';
-      const mockLocalStorage = {
-        getItem: vi.fn().mockReturnValue(JSON.stringify(mockUserId)),
-      };
-      const mockIframe = {
-        style: { display: '' },
-        contentWindow: {
-          localStorage: mockLocalStorage,
-        },
-      };
+    it('should prefer the cached user ID in page storage', () => {
+      useStorage({ user_id_cache: JSON.stringify('123456789012345678') });
+      useWebpack({ 1: moduleWith({ getCurrentUser: () => ({ id: '999' }) }) });
 
-      const originalCreateElement = document.createElement.bind(document);
-      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
-        if (tagName === 'iframe') {
-          return mockIframe as unknown as HTMLIFrameElement;
-        }
-        return originalCreateElement(tagName);
-      });
-
-      vi.spyOn(document.body, 'appendChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-      vi.spyOn(document.body, 'removeChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-
-      const result = getAuthorId();
-
-      expect(result).toBe(mockUserId);
-      expect(mockLocalStorage.getItem).toHaveBeenCalledWith('user_id_cache');
+      expect(getAuthorId()).toBe('123456789012345678');
     });
 
-    it('should return null when user_id_cache is missing', () => {
-      const mockLocalStorage = {
-        getItem: vi.fn().mockReturnValue(null),
-      };
-      const mockIframe = {
-        style: { display: '' },
-        contentWindow: {
-          localStorage: mockLocalStorage,
-        },
-      };
+    it('should fall back to webpack when storage has no cached ID', () => {
+      useStorage({});
+      useWebpack({ 1: moduleWith({ getCurrentUser: () => ({ id: '999999999999999999' }) }) });
 
-      const originalCreateElement = document.createElement.bind(document);
-      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
-        if (tagName === 'iframe') {
-          return mockIframe as unknown as HTMLIFrameElement;
-        }
-        return originalCreateElement(tagName);
-      });
-
-      vi.spyOn(document.body, 'appendChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-      vi.spyOn(document.body, 'removeChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-
-      const result = getAuthorId();
-
-      expect(result).toBeNull();
+      expect(getAuthorId()).toBe('999999999999999999');
     });
 
-    it('should return null when iframe contentWindow is null', () => {
-      const mockIframe = {
-        style: { display: '' },
-        contentWindow: null,
-      };
+    it('should return null when neither source has an ID', () => {
+      useStorage(null);
 
-      const originalCreateElement = document.createElement.bind(document);
-      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
-        if (tagName === 'iframe') {
-          return mockIframe as unknown as HTMLIFrameElement;
-        }
-        return originalCreateElement(tagName);
-      });
-
-      vi.spyOn(document.body, 'appendChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-      vi.spyOn(document.body, 'removeChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-
-      const result = getAuthorId();
-
-      expect(result).toBeNull();
+      expect(getAuthorId()).toBeNull();
     });
 
-    it('should handle JSON parsing errors', () => {
-      const mockLocalStorage = {
-        getItem: vi.fn().mockReturnValue('invalid-json'),
-      };
-      const mockIframe = {
-        style: { display: '' },
-        contentWindow: {
-          localStorage: mockLocalStorage,
-        },
-      };
+    it('should return null for a malformed cached ID and no webpack', () => {
+      useStorage({ user_id_cache: 'not-json' });
 
-      const originalCreateElement = document.createElement.bind(document);
-      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
-        if (tagName === 'iframe') {
-          return mockIframe as unknown as HTMLIFrameElement;
-        }
-        return originalCreateElement(tagName);
-      });
-
-      vi.spyOn(document.body, 'appendChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-      vi.spyOn(document.body, 'removeChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-
-      const result = getAuthorId();
-
-      expect(result).toBeNull();
-    });
-
-    it('should return null when localStorage is not accessible', () => {
-      const result = getAuthorId();
-      expect(result).toBeNull();
+      expect(getAuthorId()).toBeNull();
     });
   });
 
   describe('getToken', () => {
-    it('should try localStorage first', () => {
-      const localStorageToken = 'localStorage-token-first';
-      const mockLocalStorage = {
-        getItem: vi.fn().mockReturnValue(JSON.stringify(localStorageToken)),
-      };
-      const mockIframe = {
-        style: { display: '' },
-        contentWindow: {
-          localStorage: mockLocalStorage,
-        },
-      };
+    it('should try webpack before page storage', () => {
+      useStorage({ token: JSON.stringify('storage-token') });
+      useWebpack({ 1: moduleWith({ getToken: () => 'webpack-token' }) });
 
-      const originalCreateElement = document.createElement.bind(document);
-      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
-        if (tagName === 'iframe') {
-          return mockIframe as unknown as HTMLIFrameElement;
-        }
-        return originalCreateElement(tagName);
-      });
-
-      vi.spyOn(document.body, 'appendChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-      vi.spyOn(document.body, 'removeChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-      window.dispatchEvent = vi.fn();
-
-      const result = getToken();
-
-      expect(result).toBe(localStorageToken);
-      // Should not need to check webpack if localStorage succeeds
+      expect(getToken()).toBe('webpack-token');
+      expect(mockedGetPageStorage).not.toHaveBeenCalled();
     });
 
-    it('should fall back to webpack when localStorage fails', () => {
-      const webpackToken = 'webpack-fallback-token';
+    it('should fall back to page storage when webpack yields nothing', () => {
+      useStorage({ token: JSON.stringify('storage-token') });
 
-      // Make localStorage fail
-      const mockIframe = {
-        style: { display: '' },
-        contentWindow: {
-          localStorage: {
-            getItem: vi.fn().mockReturnValue(null),
-          },
-        },
-      };
-
-      const originalCreateElement = document.createElement.bind(document);
-      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
-        if (tagName === 'iframe') {
-          return mockIframe as unknown as HTMLIFrameElement;
-        }
-        return originalCreateElement(tagName);
-      });
-
-      vi.spyOn(document.body, 'appendChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-      vi.spyOn(document.body, 'removeChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-      window.dispatchEvent = vi.fn();
-
-      // Set up webpack to succeed
-      const mockModules: Record<string, { exports?: { default?: { getToken?: () => string } } }> = {
-        module1: {
-          exports: {
-            default: {
-              getToken: () => webpackToken,
-            },
-          },
-        },
-      };
-
-      const webpackChunk: unknown[] = [];
-      const originalPush = webpackChunk.push.bind(webpackChunk);
-      webpackChunk.push = (...args: unknown[]) => {
-        const chunk = args[0] as [
-          string[],
-          Record<string, unknown>,
-          (require: { c: Record<string, unknown> }) => void,
-        ];
-        if (chunk?.[2] && typeof chunk[2] === 'function') {
-          chunk[2]({ c: mockModules });
-        }
-        return originalPush(...args);
-      };
-
-      (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = webpackChunk;
-
-      const result = getToken();
-
-      expect(result).toBe(webpackToken);
+      expect(getToken()).toBe('storage-token');
     });
 
-    it('should return null when both methods fail', () => {
-      // Make localStorage fail
-      const mockIframe = {
-        style: { display: '' },
-        contentWindow: {
-          localStorage: {
-            getItem: vi.fn().mockReturnValue(null),
-          },
-        },
-      };
+    it('should return null when both strategies fail', () => {
+      useStorage(null);
 
-      const originalCreateElement = document.createElement.bind(document);
-      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
-        if (tagName === 'iframe') {
-          return mockIframe as unknown as HTMLIFrameElement;
-        }
-        return originalCreateElement(tagName);
-      });
-
-      vi.spyOn(document.body, 'appendChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-      vi.spyOn(document.body, 'removeChild').mockReturnValue(
-        mockIframe as unknown as HTMLIFrameElement,
-      );
-      window.dispatchEvent = vi.fn();
-
-      // Make webpack fail (no webpackChunkdiscord_app)
-      (window as unknown as Record<string, unknown>).webpackChunkdiscord_app = undefined;
-
-      const result = getToken();
-
-      expect(result).toBeNull();
-    });
-
-    it('should return null when no token methods succeed', () => {
-      const result = getToken();
-      expect(result).toBeNull();
+      expect(getToken()).toBeNull();
     });
   });
 });

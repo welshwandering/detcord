@@ -1,125 +1,185 @@
 /**
  * Token extraction utilities for Detcord
  *
- * Provides methods to obtain Discord authentication tokens from the browser environment.
- * These methods work within the Discord web application context.
+ * Discord's client no longer keeps the auth token under the `token` key in
+ * storage, so webpack module introspection is the primary route and the
+ * storage read is only a fallback for older or forked clients. Nothing here
+ * ever throws: every strategy returns null when it cannot produce a value.
  */
+
+import { getPageStorage } from './storage';
+
+/** Storage key Discord historically used for the auth token. */
+const TOKEN_STORAGE_KEY = 'token';
+
+/** Storage key Discord uses to remember the last signed-in account. */
+const USER_ID_STORAGE_KEY = 'user_id_cache';
+
+/** Name of the webpack chunk registry Discord exposes on `window`. */
+const WEBPACK_CHUNK_KEY = 'webpackChunkdiscord_app';
+
+/** A webpack module record as seen through `require.c`. */
+interface WebpackModule {
+  exports?: unknown;
+}
+
+/** The subset of webpack's `require` we touch. */
+interface WebpackRequire {
+  c?: Record<string, WebpackModule | undefined>;
+}
+
+/** The chunk array Discord exposes; pushing a chunk runs our callback. */
+type WebpackChunkRegistry = { push(chunk: unknown): unknown };
 
 /**
- * Attempts to extract the Discord auth token from localStorage via an iframe.
- * This bypasses Discord's overridden localStorage by using a fresh iframe context.
- *
- * @returns The token string if found, null otherwise
+ * Generates a chunk id that cannot collide with a previous extraction.
+ * Webpack keys installed chunks by this value, so a fixed name would make the
+ * second call a no-op.
  */
-export function getTokenFromLocalStorage(): string | null {
-  try {
-    // Trigger beforeunload to ensure localStorage is flushed
-    window.dispatchEvent(new Event('beforeunload'));
-
-    // Create iframe to access unmodified localStorage
-    const iframe = document.createElement('iframe');
-    iframe.style.display = 'none';
-    document.body.appendChild(iframe);
-
-    const iframeWindow = iframe.contentWindow;
-    if (!iframeWindow) {
-      document.body.removeChild(iframe);
-      return null;
-    }
-
-    const storage = iframeWindow.localStorage;
-    document.body.removeChild(iframe);
-
-    const tokenValue = storage.getItem('token');
-    if (tokenValue) {
-      // Token is stored as JSON string, need to parse
-      return JSON.parse(tokenValue) as string;
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
+function uniqueChunkId(): string {
+  return `detcord-token-extractor-${Math.random().toString(36).slice(2)}`;
 }
 
 /**
- * Attempts to extract the Discord auth token via webpack module introspection.
- * This method looks for the token manager module in Discord's webpack bundles.
- *
- * @returns The token string if found, null otherwise
+ * Reads the `default` export of a webpack module, if it has one.
  */
-export function getTokenFromWebpack(): string | null {
+function moduleDefaultExport(module: WebpackModule): Record<string, unknown> | null {
+  const exports = module.exports;
+  if (!exports || typeof exports !== 'object') {
+    return null;
+  }
+  const defaultExport = (exports as { default?: unknown }).default;
+  if (!defaultExport || typeof defaultExport !== 'object') {
+    return null;
+  }
+  return defaultExport as Record<string, unknown>;
+}
+
+/**
+ * Runs `pick` against every loaded webpack module and returns the first
+ * non-null result. No module reference outlives this call.
+ *
+ * @param pick - Inspector invoked per module; return null to keep looking
+ * @returns The first value produced, or null when webpack is absent
+ */
+function findInWebpackModules<T>(pick: (module: WebpackModule) => T | null): T | null {
+  const registry = (window as unknown as Record<string, unknown>)[WEBPACK_CHUNK_KEY] as
+    | WebpackChunkRegistry
+    | undefined;
+
+  if (!registry || typeof registry.push !== 'function') {
+    return null;
+  }
+
+  const found: { value: T | null } = { value: null };
+
   try {
-    // Discord uses webpack and exposes chunks on window
-    const webpackChunk = (window as unknown as Record<string, unknown>).webpackChunkdiscord_app as
-      | Array<unknown>
-      | undefined;
-
-    if (!webpackChunk) {
-      return null;
-    }
-
-    // Collect all webpack modules
-    const modules: Array<{ exports?: { default?: { getToken?: () => string } } }> = [];
-
-    webpackChunk.push([
-      ['detcord-token-extractor'],
+    registry.push([
+      [uniqueChunkId()],
       {},
-      (require: { c: Record<string, { exports?: unknown }> }) => {
-        for (const moduleId in require.c) {
-          const module = require.c[moduleId];
-          if (module) {
-            modules.push(module as (typeof modules)[0]);
+      (webpackRequire: WebpackRequire) => {
+        for (const module of Object.values(webpackRequire.c ?? {})) {
+          if (!module) {
+            continue;
+          }
+          try {
+            const value = pick(module);
+            if (value !== null) {
+              found.value = value;
+              break;
+            }
+          } catch {
+            // A module getter threw; skip it and keep looking.
           }
         }
       },
     ]);
-
-    // Find module with getToken method
-    for (const module of modules) {
-      if (module?.exports?.default?.getToken) {
-        const token = module.exports.default.getToken();
-        if (typeof token === 'string' && token.length > 0) {
-          return token;
-        }
-      }
-    }
-
+  } catch {
     return null;
+  }
+
+  return found.value;
+}
+
+/**
+ * Attempts to extract the Discord auth token via webpack module introspection.
+ *
+ * Looks for the module whose default export exposes `getToken()`, which is how
+ * Discord's own client reads its token.
+ *
+ * @returns The token string if found, null otherwise
+ */
+export function getTokenFromWebpack(): string | null {
+  return findInWebpackModules((module) => {
+    const defaultExport = moduleDefaultExport(module);
+    if (typeof defaultExport?.getToken !== 'function') {
+      return null;
+    }
+    const token: unknown = (defaultExport.getToken as () => unknown).call(defaultExport);
+    return typeof token === 'string' && token.length > 0 ? token : null;
+  });
+}
+
+/**
+ * Attempts to extract the current user's ID via webpack module introspection.
+ *
+ * Looks for the module whose default export exposes `getCurrentUser()`.
+ *
+ * @returns The user ID string if found, null otherwise
+ */
+export function getAuthorIdFromWebpack(): string | null {
+  return findInWebpackModules((module) => {
+    const defaultExport = moduleDefaultExport(module);
+    if (typeof defaultExport?.getCurrentUser !== 'function') {
+      return null;
+    }
+    const user: unknown = (defaultExport.getCurrentUser as () => unknown).call(defaultExport);
+    const id = (user as { id?: unknown } | null | undefined)?.id;
+    return typeof id === 'string' && id.length > 0 ? id : null;
+  });
+}
+
+/**
+ * Reads a JSON-encoded string from page storage.
+ *
+ * @param key - Storage key to read
+ * @returns The decoded string, or null when absent or malformed
+ */
+function readJsonString(key: string): string | null {
+  try {
+    const raw = getPageStorage()?.getItem(key);
+    if (!raw) {
+      return null;
+    }
+    const parsed: unknown = JSON.parse(raw);
+    return typeof parsed === 'string' && parsed.length > 0 ? parsed : null;
   } catch {
     return null;
   }
 }
 
 /**
- * Attempts to extract the current user's author ID from localStorage.
+ * Attempts to extract the Discord auth token from page storage.
+ *
+ * Discord removed this key from its own client some years ago, so this is a
+ * fallback for forks and older builds rather than the expected path.
+ *
+ * @returns The token string if found, null otherwise
+ */
+export function getTokenFromLocalStorage(): string | null {
+  return readJsonString(TOKEN_STORAGE_KEY);
+}
+
+/**
+ * Attempts to determine the current user's ID.
+ *
+ * Reads the cached user ID from page storage, then falls back to webpack
+ * introspection.
  *
  * @returns The user ID string if found, null otherwise
  */
 export function getAuthorId(): string | null {
-  try {
-    const iframe = document.createElement('iframe');
-    iframe.style.display = 'none';
-    document.body.appendChild(iframe);
-
-    const iframeWindow = iframe.contentWindow;
-    if (!iframeWindow) {
-      document.body.removeChild(iframe);
-      return null;
-    }
-
-    const storage = iframeWindow.localStorage;
-    document.body.removeChild(iframe);
-
-    const userIdCache = storage.getItem('user_id_cache');
-    if (userIdCache) {
-      return JSON.parse(userIdCache) as string;
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
+  return readJsonString(USER_ID_STORAGE_KEY) ?? getAuthorIdFromWebpack();
 }
 
 /**
@@ -149,17 +209,12 @@ export function getChannelIdFromUrl(): string | null {
 
 /**
  * Attempts to get the Discord auth token using all available methods.
- * Tries localStorage first, then falls back to webpack introspection.
+ *
+ * Webpack introspection runs first because it reflects how the live client
+ * stores its token; the storage read is the fallback.
  *
  * @returns The token string if found, null otherwise
  */
 export function getToken(): string | null {
-  // Try localStorage first (faster)
-  const localStorageToken = getTokenFromLocalStorage();
-  if (localStorageToken) {
-    return localStorageToken;
-  }
-
-  // Fall back to webpack introspection
-  return getTokenFromWebpack();
+  return getTokenFromWebpack() ?? getTokenFromLocalStorage();
 }
