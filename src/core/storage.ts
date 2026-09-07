@@ -54,7 +54,7 @@ function probeWindowStorage(): Storage | null {
  */
 function probeIframeStorage(): Storage | null {
   try {
-    if (!storageFrame || !storageFrame.isConnected) {
+    if (!storageFrame?.isConnected) {
       const frame = document.createElement('iframe');
       frame.style.display = 'none';
       frame.setAttribute('aria-hidden', 'true');
