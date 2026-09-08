@@ -70,10 +70,17 @@ describe('enableWindowDragging', () => {
 });
 
 describe('createMiniIndicator', () => {
-  it('exposes the ring and percentage bindings the progress view writes to', () => {
+  it('is a pill carrying the count the progress view writes to', () => {
     const indicator = createMiniIndicator();
     expect(indicator.getAttribute('data-action')).toBe('maximize');
-    expect(indicator.querySelector('[data-bind="miniRing"]')).not.toBeNull();
-    expect(indicator.querySelector('[data-bind="miniPercent"]')?.textContent).toBe('0%');
+    expect(indicator.querySelector('svg')).toBeNull();
+    expect(indicator.querySelector('[data-bind="miniCount"]')?.textContent).toBe('0 / 0');
+  });
+
+  it('writes the count as text, never as markup', () => {
+    const indicator = createMiniIndicator();
+    const count = indicator.querySelector('[data-bind="miniCount"]') as HTMLElement;
+    count.textContent = '<img src=x>';
+    expect(indicator.querySelector('img')).toBeNull();
   });
 });

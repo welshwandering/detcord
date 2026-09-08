@@ -80,7 +80,7 @@ export function enableWindowDragging(windowEl: HTMLElement, header: HTMLElement)
 }
 
 /**
- * Builds the small floating indicator shown while a run continues minimised.
+ * Builds the small floating pill shown while a run continues minimised.
  *
  * @returns The indicator element, not yet attached
  */
@@ -88,14 +88,11 @@ export function createMiniIndicator(): HTMLElement {
   const indicator = document.createElement('div');
   indicator.className = `${CSS_PREFIX}-mini-indicator`;
   indicator.setAttribute('data-action', 'maximize');
-  indicator.innerHTML = `
-      <div class="${CSS_PREFIX}-mini-progress">
-        <svg class="${CSS_PREFIX}-mini-ring" viewBox="0 0 44 44">
-          <circle class="${CSS_PREFIX}-mini-ring-bg" cx="22" cy="22" r="20"/>
-          <circle class="${CSS_PREFIX}-mini-ring-fill" cx="22" cy="22" r="20" data-bind="miniRing"/>
-        </svg>
-        <div class="${CSS_PREFIX}-mini-percent" data-bind="miniPercent">0%</div>
-      </div>
-    `;
+  indicator.setAttribute('aria-label', 'Reopen Detcord');
+  const count = document.createElement('span');
+  count.className = `${CSS_PREFIX}-mini-count`;
+  count.setAttribute('data-bind', 'miniCount');
+  count.textContent = '0 / 0';
+  indicator.appendChild(count);
   return indicator;
 }

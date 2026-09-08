@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { DeletionEngineState, DeletionEngineStats } from './ports';
-import { createFeedElement, ProgressView } from './progress-view';
+import { completionReceipt, createFeedElement, ProgressView } from './progress-view';
 import type { RunProgress, RunSummary } from './runner';
 import { createWindowHTML } from './window-markup';
 
@@ -55,26 +55,31 @@ function summary(overrides: Partial<RunSummary> = {}): RunSummary {
   };
 }
 
+/** The visible parts of a log row, in the order they are rendered. */
+function rowParts(el: HTMLElement): string[] {
+  return [...el.children].map((child) => child.textContent ?? '');
+}
+
 describe('createFeedElement', () => {
+  const at = Date.parse('2024-05-01T17:26:41');
+
+  it('renders a time column, an outcome and the message text', () => {
+    const el = createFeedElement({ messageId: '1', content: 'hello', status: 'deleted', at });
+    expect(rowParts(el)).toEqual(['17:26:41', 'deleted', 'hello']);
+  });
+
   it('labels each outcome distinctly rather than always reporting success', () => {
-    expect(createFeedElement({ messageId: '1', content: 'a', status: 'deleted' }).textContent).toBe(
-      '[deleted] a',
+    const label = (entry: Parameters<typeof createFeedElement>[0]): string =>
+      createFeedElement(entry).querySelector('.detcord-log-outcome')?.textContent ?? '';
+
+    expect(label({ messageId: '1', content: 'a', status: 'deleted' })).toBe('deleted');
+    expect(label({ messageId: '2', content: 'b', status: 'already_gone' })).toBe('already gone');
+    expect(label({ messageId: '3', content: 'c', status: 'skipped', reason: 'pinned' })).toBe(
+      'skipped · pinned',
     );
-    expect(
-      createFeedElement({ messageId: '2', content: 'b', status: 'already_gone' }).textContent,
-    ).toBe('[already gone] b');
-    expect(
-      createFeedElement({ messageId: '3', content: 'c', status: 'skipped', reason: 'pinned' })
-        .textContent,
-    ).toBe('[skipped: pinned] c');
-    expect(
-      createFeedElement({
-        messageId: '4',
-        content: 'd',
-        status: 'failed',
-        reason: 'Missing Access',
-      }).textContent,
-    ).toBe('[failed: Missing Access] d');
+    expect(label({ messageId: '4', content: 'd', status: 'failed', reason: '403' })).toBe(
+      'failed · 403',
+    );
   });
 
   it('carries an outcome-specific class', () => {
@@ -96,10 +101,39 @@ describe('createFeedElement', () => {
     expect(el.textContent).toContain('<img src=x onerror=alert(1)>');
   });
 
-  it('truncates long content', () => {
+  it('truncates long content with an ellipsis', () => {
     const el = createFeedElement({ messageId: '1', content: 'x'.repeat(200), status: 'deleted' });
-    expect(el.textContent?.endsWith('...')).toBe(true);
-    expect((el.textContent ?? '').length).toBeLessThan(120);
+    const text = el.querySelector('.detcord-log-text')?.textContent ?? '';
+    expect(text.endsWith('…')).toBe(true);
+    expect(text.length).toBe(81);
+  });
+
+  it('names an empty message rather than rendering a blank row', () => {
+    const el = createFeedElement({ messageId: '1', content: '', status: 'deleted' });
+    expect(el.querySelector('.detcord-log-text')?.textContent).toBe('[No content]');
+  });
+});
+
+describe('completionReceipt', () => {
+  it('lists the outcomes and the duration', () => {
+    expect(completionReceipt(summary())).toEqual([
+      { label: 'Deleted', value: '5' },
+      { label: 'Skipped', value: '0' },
+      { label: 'Failed', value: '0' },
+      { label: 'Duration', value: '5s' },
+    ]);
+  });
+
+  it('adds already gone only when there were any', () => {
+    const labels = completionReceipt(summary({ alreadyGone: 4 })).map((row) => row.label);
+    expect(labels).toContain('Already gone');
+    expect(completionReceipt(summary()).map((row) => row.label)).not.toContain('Already gone');
+  });
+
+  it('adds channels only for a multi-channel run', () => {
+    const rows = completionReceipt(summary({ channelCount: 4, channelsCompleted: 3 }));
+    expect(rows).toContainEqual({ label: 'Channels', value: '3 of 4' });
+    expect(completionReceipt(summary()).map((row) => row.label)).not.toContain('Channels');
   });
 });
 
@@ -120,7 +154,28 @@ describe('ProgressView', () => {
   const text = (binding: string): string =>
     root.querySelector(`[data-bind="${binding}"]`)?.textContent ?? '';
 
-  it('renders aggregated counters', () => {
+  const receiptRows = (): string[][] =>
+    [...root.querySelectorAll('[data-bind="completeReceipt"] .detcord-receipt-row')].map((row) =>
+      [...row.children].map((cell) => cell.textContent ?? ''),
+    );
+
+  it('renders the count as "processed of total" and moves the bar', () => {
+    view.push(
+      progress({
+        state: state({ initialTotalFound: 12 }),
+        totals: { deleted: 5, failed: 1, skipped: 1, alreadyGone: 0 },
+      }),
+      'm1',
+      'hello',
+      { status: 'deleted' },
+    );
+    expect(text('progressCount')).toBe('7 of 12');
+    expect((root.querySelector('[data-bind="progressBar"]') as HTMLElement).style.width).toBe(
+      '58%',
+    );
+  });
+
+  it('renders each figure separately rather than folding them together', () => {
     view.push(
       progress({
         state: state({ initialTotalFound: 4 }),
@@ -133,8 +188,20 @@ describe('ProgressView', () => {
     expect(text('deletedCount')).toBe('2');
     expect(text('failedCount')).toBe('1');
     expect(text('skippedCount')).toBe('1');
-    expect(text('progressCount')).toBe('4 / 4');
-    expect(text('progressPercent')).toBe('100%');
+  });
+
+  it('shows the already-gone figure only once there is one', () => {
+    const figure = root.querySelector('[data-bind="alreadyGoneFigure"]') as HTMLElement;
+    expect(figure.classList.contains('detcord-run-figure-hidden')).toBe(true);
+
+    view.push(
+      progress({ totals: { deleted: 1, failed: 0, skipped: 0, alreadyGone: 3 } }),
+      'm1',
+      'x',
+      { status: 'already_gone' },
+    );
+    expect(figure.classList.contains('detcord-run-figure-hidden')).toBe(false);
+    expect(text('alreadyGone')).toBe('3');
   });
 
   it('shows the channel position only for multi-channel runs', () => {
@@ -144,58 +211,89 @@ describe('ProgressView', () => {
     expect(text('channelProgress')).toBe('');
   });
 
-  it('appends one feed row per processed message', () => {
+  it('appends one log row per processed message', () => {
     view.push(progress(), 'm1', 'first', { status: 'deleted' });
     view.push(progress(), 'm2', 'second', { status: 'failed', reason: 'nope' });
     const feed = root.querySelector('[data-bind="feed"]');
     expect(feed?.children).toHaveLength(2);
-    expect(feed?.children[1]?.textContent).toContain('[failed: nope]');
+    expect(feed?.children[1]?.textContent).toContain('failed · nope');
   });
 
-  it('announces a completed run and celebrates only a clean sweep', () => {
+  // =========================================================================
+  // Status line
+  // =========================================================================
+
+  it('states what the engine is doing', () => {
+    expect(text('statusMessage')).toBe('Deleting…');
+    view.setStatus("Waiting for Discord's search index…");
+    expect(text('statusMessage')).toBe("Waiting for Discord's search index…");
+    view.setStatus(undefined);
+    expect(text('statusMessage')).toBe('Deleting…');
+  });
+
+  it('names the rate-limit wait in seconds', () => {
+    view.setThrottleState(true, 4200);
+    expect(text('statusMessage')).toBe("Waiting 4 s for Discord's rate limit");
+    view.setThrottleState(false, 0);
+    expect(text('statusMessage')).toBe('Deleting…');
+  });
+
+  it('reports a pause ahead of any wait', () => {
+    view.setThrottleState(true, 4000);
+    view.setPaused(true);
+    expect(text('statusMessage')).toBe('Paused');
+    view.setPaused(false);
+    expect(text('statusMessage')).toBe("Waiting 4 s for Discord's rate limit");
+  });
+
+  // =========================================================================
+  // Completion
+  // =========================================================================
+
+  it('titles a clean run by what it deleted', () => {
     view.showCompletion(summary());
-    expect(text('completeTitle')).toBe('All clean!');
-    expect(text('completeSummary')).toBe('5 deleted · 0 skipped · 0 failed');
-    expect(root.querySelector('.confetti')).not.toBeNull();
-  });
-
-  it('does not celebrate when messages failed', () => {
-    view.showCompletion(summary({ failed: 2 }));
-    expect(text('completeSummary')).toContain('2 failed');
-    expect(root.querySelector('.confetti')).toBeNull();
+    expect(text('completeTitle')).toBe('5 deleted');
+    expect(receiptRows()).toEqual([
+      ['Deleted', '5'],
+      ['Skipped', '0'],
+      ['Failed', '0'],
+      ['Duration', '5s'],
+    ]);
   });
 
   it('says so when a completed run left failures behind', () => {
     view.showCompletion(summary({ failed: 2 }));
-    expect(text('completeTitle')).toBe('Finished with failures');
+    expect(text('completeTitle')).toBe('2 could not be deleted');
   });
 
   it('says so when a completed run skipped messages', () => {
     view.showCompletion(summary({ skipped: 3 }));
-    expect(text('completeTitle')).toBe('Finished, some skipped');
-    expect(root.querySelector('.confetti')).toBeNull();
+    expect(text('completeTitle')).toBe('Finished, 3 skipped');
   });
 
   it('reports failures ahead of skips when both happened', () => {
     view.showCompletion(summary({ failed: 1, skipped: 1 }));
-    expect(text('completeTitle')).toBe('Finished with failures');
+    expect(text('completeTitle')).toBe('1 could not be deleted');
   });
 
   it('counts messages that were already gone', () => {
     view.showCompletion(summary({ alreadyGone: 4 }));
-    expect(text('completeSummary')).toBe('5 deleted · 4 already gone · 0 skipped · 0 failed');
+    expect(receiptRows()).toContainEqual(['Already gone', '4']);
   });
 
-  it('does not celebrate a run that deleted nothing', () => {
-    view.showCompletion(summary({ deleted: 0 }));
-    expect(text('completeTitle')).toBe('All clean!');
-    expect(root.querySelector('.confetti')).toBeNull();
+  it('announces a run the user stopped and offers to resume it later', () => {
+    view.showCompletion(summary({ reason: 'stopped', deleted: 7, failed: 2, skipped: 1 }));
+    expect(text('completeTitle')).toBe('Stopped after 7');
+    expect(
+      (root.querySelector('[data-bind="completeResumeNote"]') as HTMLElement).style.display,
+    ).toBe('block');
   });
 
-  it('announces a run the user stopped', () => {
-    view.showCompletion(summary({ reason: 'stopped', failed: 2, skipped: 1 }));
-    expect(text('completeTitle')).toBe('Stopped by you');
-    expect(root.querySelector('.confetti')).toBeNull();
+  it('offers no resume note after a run that finished', () => {
+    view.showCompletion(summary());
+    expect(
+      (root.querySelector('[data-bind="completeResumeNote"]') as HTMLElement).style.display,
+    ).toBe('none');
   });
 
   it('announces an error and shows its message', () => {
@@ -206,37 +304,22 @@ describe('ProgressView', () => {
 
   it('reports how many channels finished for a multi-channel run', () => {
     view.showCompletion(summary({ channelCount: 4, channelsCompleted: 3 }));
-    expect(text('completeDetail')).toBe('3 of 4 channels finished');
+    expect(receiptRows()).toContainEqual(['Channels', '3 of 4']);
   });
 
-  it('shows and clears the rate-limit notice', () => {
-    view.setThrottleState(true, 4200);
-    const notice = root.querySelector('[data-screen="running"] .detcord-waiting');
-    expect(notice?.textContent).toContain('4s');
-    view.setThrottleState(false, 0);
-    expect(root.querySelector('[data-screen="running"] .detcord-waiting')).toBeNull();
+  it('replaces the previous receipt rather than appending to it', () => {
+    view.showCompletion(summary({ alreadyGone: 2 }));
+    view.showCompletion(summary());
+    expect(receiptRows()).toHaveLength(4);
   });
 
-  it('shows and clears the engine status line', () => {
-    view.setStatus('Finding oldest message...');
-    expect(text('currentMessage')).toBe('Finding oldest message...');
-    expect(
-      root
-        .querySelector('[data-bind="currentMessage"]')
-        ?.classList.contains('detcord-status-searching'),
-    ).toBe(true);
-    view.setStatus(undefined);
-    expect(
-      root
-        .querySelector('[data-bind="currentMessage"]')
-        ?.classList.contains('detcord-status-searching'),
-    ).toBe(false);
-  });
+  // =========================================================================
+  // Minimised indicator and lifecycle
+  // =========================================================================
 
-  it('keeps the minimised ring in step', () => {
+  it('keeps the minimised pill in step', () => {
     const mini = document.createElement('div');
-    mini.innerHTML =
-      '<svg><circle data-bind="miniRing"/></svg><div data-bind="miniPercent">0%</div>';
+    mini.innerHTML = '<span data-bind="miniCount">0 / 0</span>';
     view.setMiniIndicator(mini);
     view.push(
       progress({
@@ -247,24 +330,28 @@ describe('ProgressView', () => {
       'x',
       { status: 'deleted' },
     );
-    expect(mini.querySelector('[data-bind="miniPercent"]')?.textContent).toBe('50%');
+    expect(mini.querySelector('[data-bind="miniCount"]')?.textContent).toBe('2 / 4');
+    expect(view.getPercent()).toBe(50);
   });
 
-  it('shows throttle statistics once the engine has been throttled', () => {
-    view.push(progress({ stats: stats({ throttledCount: 3, throttledTime: 9000 }) }), 'm', 'x', {
-      status: 'deleted',
-    });
-    expect(text('throttleCount')).toBe('3x (9s)');
-    expect((root.querySelector('[data-bind="throttleInfo"]') as HTMLElement).style.display).toBe(
-      'flex',
+  it('clears the log, counters and status on reset', () => {
+    view.setPaused(true);
+    view.push(
+      progress({ totals: { deleted: 1, failed: 0, skipped: 0, alreadyGone: 2 } }),
+      'm1',
+      'x',
+      { status: 'deleted' },
     );
-  });
-
-  it('clears the feed and counters on reset', () => {
-    view.push(progress(), 'm1', 'x', { status: 'deleted' });
     view.reset();
     expect(root.querySelector('[data-bind="feed"]')?.children).toHaveLength(0);
     expect(text('deletedCount')).toBe('0');
+    expect(text('progressCount')).toBe('0 of 0');
+    expect(text('statusMessage')).toBe('Deleting…');
+    expect(
+      root
+        .querySelector('[data-bind="alreadyGoneFigure"]')
+        ?.classList.contains('detcord-run-figure-hidden'),
+    ).toBe(true);
   });
 
   it('tolerates being used before attach and after dispose', () => {
@@ -276,6 +363,7 @@ describe('ProgressView', () => {
     expect(() => {
       detached.reset();
       detached.setStatus('x');
+      detached.setPaused(true);
       detached.setThrottleState(true, 1000);
       detached.setChannelPosition({ index: 1, count: 2, channelId: 'c' });
       detached.push(progress(), 'm', 'x', { status: 'deleted' });

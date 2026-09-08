@@ -16,7 +16,7 @@ import {
   DEFAULT_MAX_FEED_ENTRIES,
   DEFAULT_PROGRESS_THROTTLE_MS,
 } from './constants';
-import { createStatusRotator, runCountdownSequence } from './effects';
+import { type HoldToConfirmHandle, runHoldToConfirm } from './effects';
 import { confirmToken, errorMessage, type IdentityResult, resolveIdentity } from './identity';
 import {
   type ApiClientFactory,
@@ -130,9 +130,8 @@ export class DetcordUI {
   private reviewConfig: RunConfig | null = null;
   private previewSignature: string | null = null;
   private scanning = false;
-  private countdownCancel: (() => void) | null = null;
+  private hold: HoldToConfirmHandle | null = null;
   private routeWatchId: ReturnType<typeof setInterval> | null = null;
-  private statusRotator: { start: () => void; stop: () => void } | null = null;
   private pendingResume: SavedProgress | null = null;
   private resumeWith: SavedProgress | null = null;
   private resumeTotals: RunPlanTotals | null = null;
@@ -218,6 +217,7 @@ export class DetcordUI {
 
     this.setupEventDelegation();
     this.setupDragging();
+    this.setupHoldToConfirm();
     this.mounted = true;
   }
 
@@ -228,10 +228,9 @@ export class DetcordUI {
     }
 
     this.runner.dispose();
-    this.cancelCountdown();
+    this.hold?.();
+    this.hold = null;
     this.stopRouteWatch();
-    this.statusRotator?.stop();
-    this.statusRotator = null;
     this.progressView.dispose();
 
     for (const cancellable of this.cancellables) {
@@ -286,7 +285,7 @@ export class DetcordUI {
       return;
     }
 
-    this.cancelCountdown();
+    this.cancelHold();
     this.stopRouteWatch();
     this.windowEl?.classList.remove('visible');
     this.backdropEl?.classList.remove('visible');
@@ -348,7 +347,6 @@ export class DetcordUI {
         this.setVisibility('runChoice', false);
         this.runner.stop();
       },
-      confirmDelete: () => this.handleConfirmDelete(),
       pause: () => this.handlePause(),
       stop: () => this.runner.stop(),
       reset: () => this.handleReset(),
@@ -418,6 +416,21 @@ export class DetcordUI {
     if (header && this.windowEl) {
       this.dragging = enableWindowDragging(this.windowEl, header);
     }
+  }
+
+  /**
+   * Arms the confirmation button.
+   *
+   * The destructive action has no click handler at all: only a completed hold
+   * (or the reduced-motion second press) reaches {@link handleConfirmDelete},
+   * so a stray click on a reviewed run cannot start it.
+   */
+  private setupHoldToConfirm(): void {
+    const button = this.windowEl?.querySelector<HTMLElement>('[data-action="confirmDelete"]');
+    if (!button) {
+      return;
+    }
+    this.hold = runHoldToConfirm(button, { onConfirm: () => this.handleConfirmDelete() });
   }
 
   // =========================================================================
@@ -612,10 +625,8 @@ export class DetcordUI {
   }
 
   private handleReset(): void {
-    this.cancelCountdown();
+    this.cancelHold();
     this.stopRouteWatch();
-    this.statusRotator?.stop();
-    this.statusRotator = null;
     this.progressView.reset();
     this.invalidateReview();
     this.resumeWith = null;
@@ -640,6 +651,7 @@ export class DetcordUI {
   // =========================================================================
 
   private invalidateReview(): void {
+    this.cancelHold();
     this.reviewConfig = null;
     this.previewSignature = null;
     this.reviewView?.setConfirmEnabled(false);
@@ -780,7 +792,7 @@ export class DetcordUI {
     if (!config || config.routePath === window.location.pathname) {
       return false;
     }
-    this.cancelCountdown();
+    this.cancelHold();
     this.stopRouteWatch();
     this.invalidateReview();
     this.wizardState.stepIndex = 0;
@@ -793,8 +805,15 @@ export class DetcordUI {
   // Running a deletion
   // =========================================================================
 
+  /**
+   * Starts the run the review screen has gated, once the hold completes.
+   *
+   * This is the hold's `onConfirm`: it can only be reached by a full 1.5
+   * second press, so the checks here are the last line rather than the only
+   * one. A second confirmation cannot start a second run.
+   */
   private handleConfirmDelete(): void {
-    if (this.countdownCancel || this.runner.isActive() || this.scanning) {
+    if (this.runner.isActive() || this.scanning) {
       return;
     }
     const config = this.reviewConfig;
@@ -806,14 +825,7 @@ export class DetcordUI {
     }
 
     this.reviewView?.setConfirmEnabled(false);
-    const container = this.windowEl;
-    if (!container) {
-      return;
-    }
-    this.countdownCancel = runCountdownSequence(container, () => {
-      this.countdownCancel = null;
-      this.beginRun(config);
-    });
+    this.beginRun(config);
   }
 
   private beginRun(config: RunConfig): void {
@@ -832,7 +844,6 @@ export class DetcordUI {
     this.lastProgress = null;
     this.progressView.reset();
     this.showScreen('running');
-    this.startStatusRotation();
 
     const resumeFrom = this.resumeWith ?? undefined;
     const baseTotals = this.resumeTotals ?? undefined;
@@ -843,22 +854,20 @@ export class DetcordUI {
 
   private handlePause(): void {
     const button = this.windowEl?.querySelector('[data-action="pause"]');
-    if (this.runner.isPaused()) {
-      this.runner.resume();
-      if (button) {
-        button.textContent = 'Pause';
-      }
-    } else {
+    const paused = !this.runner.isPaused();
+    if (paused) {
       this.runner.pause();
-      if (button) {
-        button.textContent = 'Resume';
-      }
+    } else {
+      this.runner.resume();
+    }
+    this.progressView.setPaused(paused);
+    if (button) {
+      button.textContent = paused ? 'Resume' : 'Pause';
     }
   }
 
   private handleRunFinished(summary: RunSummary): void {
-    this.statusRotator?.stop();
-    this.statusRotator = null;
+    this.progressView.setPaused(false);
     this.progressView.flush(this.lastProgress);
     this.progressView.showCompletion(summary);
     this.setVisibility('runChoice', false);
@@ -866,15 +875,6 @@ export class DetcordUI {
     if (this.minimized) {
       this.handleMaximize();
     }
-  }
-
-  private startStatusRotation(): void {
-    const el = this.windowEl?.querySelector<HTMLElement>('[data-bind="statusMessage"]');
-    if (!el) {
-      return;
-    }
-    this.statusRotator = createStatusRotator(el, 3000);
-    this.statusRotator.start();
   }
 
   // =========================================================================
@@ -991,11 +991,8 @@ export class DetcordUI {
     }
   }
 
-  private cancelCountdown(): void {
-    if (this.countdownCancel) {
-      this.countdownCancel();
-      this.countdownCancel = null;
-    }
+  private cancelHold(): void {
+    this.hold?.cancel();
   }
 
   private showError(message: string): void {

@@ -1,300 +1,284 @@
 /**
- * Tests for Visual Effects Module
+ * Tests for hold-to-confirm.
+ *
+ * The control guards an irreversible action, so the cases that matter are the
+ * ones where it must *not* fire: a short press, a release, Escape, a pointer
+ * that wanders off, and a disposed control.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  createConfetti,
-  createStatusRotator,
-  flashElement,
-  runCountdownSequence,
-  STATUS_MESSAGES,
-  shakeElement,
-} from './effects';
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
+import { HOLD_SECOND_STEP_LABEL, HOLD_TO_CONFIRM_MS, runHoldToConfirm } from './effects';
 
-describe('effects module', () => {
-  let container: HTMLElement;
+/** Dispatches a pointer event; jsdom has no PointerEvent constructor. */
+function pointer(target: EventTarget, type: string, init: MouseEventInit = {}): void {
+  target.dispatchEvent(new MouseEvent(type, { bubbles: true, ...init }));
+}
+
+function key(target: EventTarget, type: string, keyName: string, repeat = false): void {
+  target.dispatchEvent(new KeyboardEvent(type, { bubbles: true, key: keyName, repeat }));
+}
+
+function progress(button: HTMLElement): number {
+  return Number(button.style.getPropertyValue('--hold-progress'));
+}
+
+function setReducedMotion(reduced: boolean): void {
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    writable: true,
+    value: (query: string) => ({
+      matches: reduced && query.includes('prefers-reduced-motion'),
+      media: query,
+      onchange: null,
+      addEventListener: (): void => {},
+      removeEventListener: (): void => {},
+      addListener: (): void => {},
+      removeListener: (): void => {},
+      dispatchEvent: (): boolean => false,
+    }),
+  });
+}
+
+describe('runHoldToConfirm', () => {
+  let button: HTMLButtonElement;
+  let onConfirm: Mock<() => void>;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    container = document.createElement('div');
-    document.body.appendChild(container);
+    document.body.innerHTML = '';
+    button = document.createElement('button');
+    button.textContent = 'Delete 12 messages';
+    document.body.appendChild(button);
+    onConfirm = vi.fn<() => void>();
   });
 
   afterEach(() => {
     vi.useRealTimers();
     document.body.innerHTML = '';
+    Reflect.deleteProperty(window, 'matchMedia');
   });
 
-  describe('createConfetti', () => {
-    it('creates confetti elements in container', () => {
-      createConfetti(container, 10, 3000);
+  it('confirms only once the hold completes', () => {
+    const hold = runHoldToConfirm(button, { onConfirm });
 
-      const confettiContainer = container.querySelector('.confetti-container');
-      expect(confettiContainer).toBeTruthy();
-      expect(confettiContainer?.querySelectorAll('.confetti').length).toBe(10);
-    });
+    pointer(button, 'pointerdown');
+    expect(button.classList.contains('holding')).toBe(true);
 
-    it('uses default count when not specified', () => {
-      createConfetti(container);
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS - 200);
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(progress(button)).toBeGreaterThan(0.5);
+    expect(progress(button)).toBeLessThan(1);
 
-      const confettiContainer = container.querySelector('.confetti-container');
-      expect(confettiContainer?.querySelectorAll('.confetti').length).toBe(30);
-    });
+    vi.advanceTimersByTime(300);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(button.classList.contains('holding')).toBe(false);
+    expect(progress(button)).toBe(0);
 
-    it('removes confetti after duration', () => {
-      createConfetti(container, 10, 1000);
-
-      expect(container.querySelector('.confetti-container')).toBeTruthy();
-
-      vi.advanceTimersByTime(1000);
-
-      expect(container.querySelector('.confetti-container')).toBeFalsy();
-    });
-
-    it('applies random styles to each confetti piece', () => {
-      createConfetti(container, 5, 3000);
-
-      const confetti = container.querySelectorAll('.confetti');
-      for (const piece of confetti) {
-        const el = piece as HTMLElement;
-        expect(el.style.getPropertyValue('--x')).toBeTruthy();
-        expect(el.style.getPropertyValue('--delay')).toBeTruthy();
-        expect(el.style.backgroundColor).toBeTruthy();
-        expect(el.style.width).toBeTruthy();
-        expect(el.style.height).toBeTruthy();
-      }
-    });
+    hold();
   });
 
-  describe('shakeElement', () => {
-    it('adds shaking class to element', () => {
-      const el = document.createElement('div');
-      shakeElement(el, 400);
+  it('does not confirm when the press is released early', () => {
+    const hold = runHoldToConfirm(button, { onConfirm });
 
-      expect(el.classList.contains('shaking')).toBe(true);
-    });
+    pointer(button, 'pointerdown');
+    vi.advanceTimersByTime(800);
+    pointer(button, 'pointerup');
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS);
 
-    it('removes shaking class after duration', async () => {
-      const el = document.createElement('div');
-      const promise = shakeElement(el, 400);
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(button.classList.contains('holding')).toBe(false);
+    expect(progress(button)).toBe(0);
 
-      vi.advanceTimersByTime(400);
-      await promise;
-
-      expect(el.classList.contains('shaking')).toBe(false);
-    });
-
-    it('resolves promise after duration', async () => {
-      const el = document.createElement('div');
-      const promise = shakeElement(el, 200);
-
-      vi.advanceTimersByTime(200);
-      await expect(promise).resolves.toBeUndefined();
-    });
+    hold();
   });
 
-  describe('flashElement', () => {
-    it('adds flash overlay to container', () => {
-      flashElement(container, 300);
+  it.each(['pointerleave', 'pointercancel'])('cancels the hold on %s', (type) => {
+    const hold = runHoldToConfirm(button, { onConfirm });
 
-      expect(container.querySelector('.flash-overlay')).toBeTruthy();
-    });
+    pointer(button, 'pointerdown');
+    vi.advanceTimersByTime(500);
+    pointer(button, type);
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS);
 
-    it('removes flash overlay after duration', async () => {
-      const promise = flashElement(container, 300);
-
-      expect(container.querySelector('.flash-overlay')).toBeTruthy();
-
-      vi.advanceTimersByTime(300);
-      await promise;
-
-      expect(container.querySelector('.flash-overlay')).toBeFalsy();
-    });
-
-    it('resolves promise after duration', async () => {
-      const promise = flashElement(container, 100);
-
-      vi.advanceTimersByTime(100);
-      await expect(promise).resolves.toBeUndefined();
-    });
+    expect(onConfirm).not.toHaveBeenCalled();
+    hold();
   });
 
-  describe('runCountdownSequence', () => {
-    it('displays countdown numbers in sequence', () => {
-      const onComplete = vi.fn();
-      runCountdownSequence(container, onComplete);
+  it('cancels the hold on Escape', () => {
+    const hold = runHoldToConfirm(button, { onConfirm });
 
-      // Check initial state - shows "3"
-      const overlay = container.querySelector('.detcord-countdown-overlay');
-      expect(overlay).toBeTruthy();
-      expect(overlay?.querySelector('.countdown-number')?.textContent).toBe('3');
-    });
+    pointer(button, 'pointerdown');
+    vi.advanceTimersByTime(500);
+    key(document, 'keydown', 'Escape');
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS);
 
-    it('progresses through 3-2-1-BOOM sequence', () => {
-      const onComplete = vi.fn();
-      runCountdownSequence(container, onComplete);
-
-      const overlay = container.querySelector('.detcord-countdown-overlay');
-
-      // Initially "3"
-      expect(overlay?.querySelector('.countdown-number')?.textContent).toBe('3');
-
-      // After 900ms -> "2"
-      vi.advanceTimersByTime(900);
-      expect(overlay?.querySelector('.countdown-number')?.textContent).toBe('2');
-
-      // After 900ms -> "1"
-      vi.advanceTimersByTime(900);
-      expect(overlay?.querySelector('.countdown-number')?.textContent).toBe('1');
-
-      // After 900ms -> "BOOM"
-      vi.advanceTimersByTime(900);
-      expect(overlay?.querySelector('.countdown-boom')?.textContent).toBe('💥 BOOM');
-    });
-
-    it('calls onComplete after full sequence', () => {
-      const onComplete = vi.fn();
-      runCountdownSequence(container, onComplete);
-
-      expect(onComplete).not.toHaveBeenCalled();
-
-      // Advance through entire sequence: 900 + 900 + 900 + 500 = 3200ms
-      vi.advanceTimersByTime(3200);
-
-      expect(onComplete).toHaveBeenCalledOnce();
-    });
-
-    it('removes overlay after completion', () => {
-      const onComplete = vi.fn();
-      runCountdownSequence(container, onComplete);
-
-      vi.advanceTimersByTime(3200);
-
-      expect(container.querySelector('.detcord-countdown-overlay')).toBeFalsy();
-    });
-
-    it('can be cancelled via cleanup function', () => {
-      const onComplete = vi.fn();
-      const cancel = runCountdownSequence(container, onComplete);
-
-      // Cancel mid-sequence
-      vi.advanceTimersByTime(1000);
-      cancel();
-
-      // Overlay should be removed immediately
-      expect(container.querySelector('.detcord-countdown-overlay')).toBeFalsy();
-
-      // Complete the remaining time
-      vi.advanceTimersByTime(2200);
-
-      // onComplete should NOT be called
-      expect(onComplete).not.toHaveBeenCalled();
-    });
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(button.classList.contains('holding')).toBe(false);
+    hold();
   });
 
-  describe('createStatusRotator', () => {
-    it('returns object with start and stop methods', () => {
-      const el = document.createElement('div');
-      const rotator = createStatusRotator(el, 3000);
+  it('cancels the hold when the button loses focus', () => {
+    const hold = runHoldToConfirm(button, { onConfirm });
 
-      expect(typeof rotator.start).toBe('function');
-      expect(typeof rotator.stop).toBe('function');
-    });
+    pointer(button, 'pointerdown');
+    vi.advanceTimersByTime(500);
+    button.dispatchEvent(new FocusEvent('blur'));
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS);
 
-    it('displays first message on start', () => {
-      const el = document.createElement('div');
-      const rotator = createStatusRotator(el, 3000);
-
-      rotator.start();
-
-      expect(el.textContent).toBe(STATUS_MESSAGES[0]);
-      expect(el.classList.contains('rotating')).toBe(true);
-
-      rotator.stop();
-    });
-
-    it('rotates through messages at interval', () => {
-      const el = document.createElement('div');
-      const rotator = createStatusRotator(el, 1000);
-
-      rotator.start();
-      expect(el.textContent).toBe(STATUS_MESSAGES[0]);
-
-      vi.advanceTimersByTime(1000);
-      expect(el.textContent).toBe(STATUS_MESSAGES[1]);
-
-      vi.advanceTimersByTime(1000);
-      expect(el.textContent).toBe(STATUS_MESSAGES[2]);
-
-      rotator.stop();
-    });
-
-    it('wraps around to first message after last', () => {
-      const el = document.createElement('div');
-      const rotator = createStatusRotator(el, 100);
-
-      rotator.start();
-
-      // Advance through all messages
-      vi.advanceTimersByTime(100 * STATUS_MESSAGES.length);
-
-      // Should wrap back to first message
-      expect(el.textContent).toBe(STATUS_MESSAGES[0]);
-
-      rotator.stop();
-    });
-
-    it('stops rotation when stop is called', () => {
-      const el = document.createElement('div');
-      const rotator = createStatusRotator(el, 1000);
-
-      rotator.start();
-
-      rotator.stop();
-
-      // Advance time
-      vi.advanceTimersByTime(5000);
-
-      // No more updates should happen after stop
-      expect(el.classList.contains('rotating')).toBe(false);
-    });
-
-    it('removes rotating class when stopped', () => {
-      const el = document.createElement('div');
-      const rotator = createStatusRotator(el, 1000);
-
-      rotator.start();
-      expect(el.classList.contains('rotating')).toBe(true);
-
-      rotator.stop();
-      expect(el.classList.contains('rotating')).toBe(false);
-    });
-
-    it('handles multiple stop calls gracefully', () => {
-      const el = document.createElement('div');
-      const rotator = createStatusRotator(el, 1000);
-
-      rotator.start();
-      rotator.stop();
-      rotator.stop(); // Should not throw
-      rotator.stop();
-
-      expect(el.classList.contains('rotating')).toBe(false);
-    });
+    expect(onConfirm).not.toHaveBeenCalled();
+    hold();
   });
 
-  describe('STATUS_MESSAGES', () => {
-    it('exports array of status messages', () => {
-      expect(Array.isArray(STATUS_MESSAGES)).toBe(true);
-      expect(STATUS_MESSAGES.length).toBeGreaterThan(0);
+  it('cancels the hold when the page is hidden', () => {
+    const hold = runHoldToConfirm(button, { onConfirm });
+
+    pointer(button, 'pointerdown');
+    vi.advanceTimersByTime(500);
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    document.dispatchEvent(new Event('visibilitychange'));
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS);
+
+    expect(onConfirm).not.toHaveBeenCalled();
+    hold();
+  });
+
+  it('holds from the keyboard and cancels when the key is released', () => {
+    const hold = runHoldToConfirm(button, { onConfirm });
+
+    key(button, 'keydown', ' ');
+    vi.advanceTimersByTime(800);
+    key(button, 'keyup', ' ');
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS);
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    key(button, 'keydown', 'Enter');
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+
+    hold();
+  });
+
+  it('ignores auto-repeat while a key is already held', () => {
+    const hold = runHoldToConfirm(button, { onConfirm });
+
+    key(button, 'keydown', 'Enter');
+    vi.advanceTimersByTime(500);
+    key(button, 'keydown', 'Enter', true);
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS);
+
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    hold();
+  });
+
+  it('refuses to start while the button is disabled', () => {
+    const hold = runHoldToConfirm(button, { onConfirm });
+    button.setAttribute('disabled', 'disabled');
+
+    pointer(button, 'pointerdown');
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS);
+
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(button.classList.contains('holding')).toBe(false);
+    hold();
+  });
+
+  it('ignores non-primary pointer buttons', () => {
+    const hold = runHoldToConfirm(button, { onConfirm });
+
+    pointer(button, 'pointerdown', { button: 2 });
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS);
+
+    expect(onConfirm).not.toHaveBeenCalled();
+    hold();
+  });
+
+  it('cancel() abandons a hold in flight but leaves the control usable', () => {
+    const hold = runHoldToConfirm(button, { onConfirm });
+
+    pointer(button, 'pointerdown');
+    vi.advanceTimersByTime(700);
+    hold.cancel();
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS);
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    pointer(button, 'pointerdown');
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+
+    hold();
+  });
+
+  it('detaches every listener on dispose', () => {
+    const hold = runHoldToConfirm(button, { onConfirm });
+    expect(button.classList.contains('detcord-hold')).toBe(true);
+
+    hold();
+
+    expect(button.classList.contains('detcord-hold')).toBe(false);
+    pointer(button, 'pointerdown');
+    key(button, 'keydown', 'Enter');
+    vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS * 2);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('honours a custom hold duration', () => {
+    const hold = runHoldToConfirm(button, { onConfirm, durationMs: 400 });
+
+    pointer(button, 'pointerdown');
+    vi.advanceTimersByTime(200);
+    expect(onConfirm).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(250);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+
+    hold();
+  });
+
+  describe('prefers-reduced-motion', () => {
+    beforeEach(() => {
+      setReducedMotion(true);
     });
 
-    it('all messages are non-empty strings', () => {
-      for (const msg of STATUS_MESSAGES) {
-        expect(typeof msg).toBe('string');
-        expect(msg.length).toBeGreaterThan(0);
-      }
+    it('asks for a second press instead of a hold', () => {
+      const hold = runHoldToConfirm(button, { onConfirm });
+
+      pointer(button, 'pointerdown');
+      expect(button.textContent).toBe(HOLD_SECOND_STEP_LABEL);
+      expect(button.classList.contains('holding')).toBe(false);
+      vi.advanceTimersByTime(HOLD_TO_CONFIRM_MS);
+      expect(onConfirm).not.toHaveBeenCalled();
+
+      pointer(button, 'pointerdown');
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+      expect(button.textContent).toBe('Delete 12 messages');
+
+      hold();
+    });
+
+    it('disarms itself after four seconds', () => {
+      const hold = runHoldToConfirm(button, { onConfirm });
+
+      pointer(button, 'pointerdown');
+      vi.advanceTimersByTime(4000);
+      expect(button.textContent).toBe('Delete 12 messages');
+
+      pointer(button, 'pointerdown');
+      expect(onConfirm).not.toHaveBeenCalled();
+      expect(button.textContent).toBe(HOLD_SECOND_STEP_LABEL);
+
+      hold();
+    });
+
+    it('disarms on Escape and restores the label', () => {
+      const hold = runHoldToConfirm(button, { onConfirm });
+
+      pointer(button, 'pointerdown');
+      key(document, 'keydown', 'Escape');
+      expect(button.textContent).toBe('Delete 12 messages');
+
+      pointer(button, 'pointerdown');
+      expect(onConfirm).not.toHaveBeenCalled();
+
+      hold();
     });
   });
 });

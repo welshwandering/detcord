@@ -13,13 +13,13 @@ export function createRunChoiceHTML(): string {
   return `
 	<!-- Choice shown when the window is closed mid-run -->
 	<div class="${CSS_PREFIX}-run-choice" data-bind="runChoice">
-		<div class="${CSS_PREFIX}-run-choice-text">A deletion is still running.</div>
+		<div class="${CSS_PREFIX}-run-choice-text">A deletion is running.</div>
 		<div class="${CSS_PREFIX}-btn-group">
 			<button class="${CSS_PREFIX}-btn ${CSS_PREFIX}-btn-secondary" data-action="keepRunning" style="flex: 1;">
-				Keep running in background
+				Keep running
 			</button>
 			<button class="${CSS_PREFIX}-btn ${CSS_PREFIX}-btn-danger" data-action="stopRun" style="flex: 1;">
-				Stop deletion
+				Stop deleting
 			</button>
 		</div>
 	</div>
@@ -46,87 +46,53 @@ export function createResumePromptHTML(): string {
 `;
 }
 
+/**
+ * One figure and its label in the running screen's row of counts.
+ *
+ * @param binding - data-bind name for the value; the row gets `<binding>Figure`
+ * @param label - Text under the figure
+ * @param hidden - Whether the figure starts hidden
+ * @returns HTML for one figure
+ */
+function figure(binding: string, label: string, hidden = false): string {
+  const cls = hidden ? ` ${CSS_PREFIX}-run-figure-hidden` : '';
+  return `
+					<div class="${CSS_PREFIX}-run-figure${cls}" data-bind="${binding}Figure">
+						<span class="${CSS_PREFIX}-run-figure-value" data-bind="${binding}">0</span>
+						<span class="${CSS_PREFIX}-run-figure-label">${label}</span>
+					</div>`;
+}
+
 /** HTML for the running, complete and error screens. */
 export function createRunScreensHTML(): string {
   return `
-		<!-- Running Screen -->
+		<!-- Running screen: one instrument, no decoration -->
 		<div class="${CSS_PREFIX}-screen" data-screen="running">
-			<!-- Status Speaker -->
-			<div class="${CSS_PREFIX}-status-speaker">
-				<div class="${CSS_PREFIX}-speaker-avatar">🧹</div>
-				<div class="${CSS_PREFIX}-speaker-bubble">
-					<div class="${CSS_PREFIX}-status-message" data-bind="statusMessage">"Nothing to see here..."</div>
-				</div>
-			</div>
+			<div class="${CSS_PREFIX}-run">
+				<div class="${CSS_PREFIX}-status-message" data-bind="statusMessage" role="status" aria-live="polite">Deleting…</div>
+				<div class="${CSS_PREFIX}-channel-progress" data-bind="channelProgress"></div>
 
-			<div class="${CSS_PREFIX}-channel-progress" data-bind="channelProgress"></div>
-
-			<div class="${CSS_PREFIX}-progress-container">
-				<!-- Circular Progress Ring -->
-				<div class="${CSS_PREFIX}-progress-ring-container">
-					<svg class="${CSS_PREFIX}-progress-ring" viewBox="0 0 120 120">
-						<defs>
-							<linearGradient id="detcord-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
-								<stop offset="0%" style="stop-color:#5865f2"/>
-								<stop offset="50%" style="stop-color:#7289da"/>
-								<stop offset="100%" style="stop-color:#5865f2"/>
-							</linearGradient>
-						</defs>
-						<circle class="${CSS_PREFIX}-progress-ring-bg" cx="60" cy="60" r="52"/>
-						<circle class="${CSS_PREFIX}-progress-ring-fill" cx="60" cy="60" r="52" data-bind="progressRing"/>
-					</svg>
-					<div class="${CSS_PREFIX}-progress-ring-text">
-						<div class="${CSS_PREFIX}-progress-percent" data-bind="progressPercent">0%</div>
-						<div class="${CSS_PREFIX}-progress-count" data-bind="progressCount">0 / 0</div>
-					</div>
+				<div class="${CSS_PREFIX}-progress-count ${CSS_PREFIX}-run-count" data-bind="progressCount">0 of 0</div>
+				<div class="${CSS_PREFIX}-progress-bar-container ${CSS_PREFIX}-run-track">
+					<div class="${CSS_PREFIX}-progress-bar ${CSS_PREFIX}-run-bar" data-bind="progressBar" style="width: 0%"></div>
 				</div>
 
-				<!-- Stats Grid -->
-				<div class="${CSS_PREFIX}-progress-stats">
-					<div class="${CSS_PREFIX}-stat">
-						<div class="${CSS_PREFIX}-stat-value success" data-bind="deletedCount">0</div>
-						<div class="${CSS_PREFIX}-stat-label">Deleted</div>
-					</div>
-					<div class="${CSS_PREFIX}-stat">
-						<div class="${CSS_PREFIX}-stat-value" data-bind="skippedCount">0</div>
-						<div class="${CSS_PREFIX}-stat-label">Skipped</div>
-					</div>
-					<div class="${CSS_PREFIX}-stat">
-						<div class="${CSS_PREFIX}-stat-value error" data-bind="failedCount">0</div>
-						<div class="${CSS_PREFIX}-stat-label">Failed</div>
-					</div>
-					<div class="${CSS_PREFIX}-stat">
-						<div class="${CSS_PREFIX}-stat-value rate" data-bind="rateValue">0</div>
-						<div class="${CSS_PREFIX}-stat-label">Per Min</div>
-					</div>
+				<div class="${CSS_PREFIX}-run-figures">${figure('deletedCount', 'Deleted')}${figure('skippedCount', 'Skipped')}${figure('failedCount', 'Failed')}${figure('alreadyGone', 'Already gone', true)}
 				</div>
 
-				<!-- Time Stats -->
-				<div class="${CSS_PREFIX}-time-stats">
-					<div class="${CSS_PREFIX}-time-stat">
-						<span class="${CSS_PREFIX}-time-label">Elapsed:</span>
-						<span class="${CSS_PREFIX}-time-value" data-bind="elapsedTime">0:00</span>
-					</div>
-					<div class="${CSS_PREFIX}-time-stat">
-						<span class="${CSS_PREFIX}-time-label">ETA:</span>
+				<div class="${CSS_PREFIX}-time-stats ${CSS_PREFIX}-run-times">
+					<span class="${CSS_PREFIX}-time-stat">
+						<span class="${CSS_PREFIX}-time-label">Elapsed</span>
+						<span class="${CSS_PREFIX}-time-value" data-bind="elapsedTime">0s</span>
+					</span>
+					<span class="${CSS_PREFIX}-time-stat">
+						<span class="${CSS_PREFIX}-time-label">Remaining</span>
 						<span class="${CSS_PREFIX}-time-value" data-bind="eta">--:--</span>
-					</div>
-					<div class="${CSS_PREFIX}-time-stat" data-bind="throttleInfo" style="display: none;">
-						<span class="${CSS_PREFIX}-time-label">Throttled:</span>
-						<span class="${CSS_PREFIX}-time-value" data-bind="throttleCount">0x</span>
-					</div>
+					</span>
 				</div>
-
-				<!-- Progress Bar -->
-				<div class="${CSS_PREFIX}-progress-bar-container">
-					<div class="${CSS_PREFIX}-progress-bar" data-bind="progressBar" style="width: 0%"></div>
-				</div>
-
-				<!-- Current Message -->
-				<div class="${CSS_PREFIX}-current-message" data-bind="currentMessage">Starting...</div>
 			</div>
 
-			<div class="${CSS_PREFIX}-feed" data-bind="feed"></div>
+			<div class="${CSS_PREFIX}-feed ${CSS_PREFIX}-log" data-bind="feed"></div>
 
 			<div class="${CSS_PREFIX}-btn-group">
 				<button class="${CSS_PREFIX}-btn ${CSS_PREFIX}-btn-secondary" data-action="pause" style="flex: 1;">
@@ -138,44 +104,40 @@ export function createRunScreensHTML(): string {
 			</div>
 		</div>
 
-		<!-- Complete Screen -->
+		<!-- Complete screen: the run as a receipt -->
 		<div class="${CSS_PREFIX}-screen" data-screen="complete">
-			<div class="${CSS_PREFIX}-confetti-container" data-bind="confettiContainer"></div>
-
 			<div class="${CSS_PREFIX}-complete">
-				<div class="${CSS_PREFIX}-complete-icon" data-bind="completeIcon">✨</div>
-				<h3 class="${CSS_PREFIX}-complete-title" data-bind="completeTitle">All clean!</h3>
-				<div class="${CSS_PREFIX}-complete-stats" data-bind="completeSummary">0 deleted · 0 skipped · 0 failed</div>
-				<div class="${CSS_PREFIX}-complete-time" data-bind="completeDuration">in 0s</div>
+				<h3 class="${CSS_PREFIX}-complete-title" data-bind="completeTitle">Finished</h3>
+				<div class="${CSS_PREFIX}-receipt" data-bind="completeReceipt"></div>
 				<div class="${CSS_PREFIX}-complete-detail" data-bind="completeDetail" style="display: none;"></div>
+				<div class="${CSS_PREFIX}-receipt-note" data-bind="completeResumeNote" style="display: none;">Resume later</div>
 			</div>
 
 			<div class="${CSS_PREFIX}-btn-group">
 				<button class="${CSS_PREFIX}-btn ${CSS_PREFIX}-btn-primary" data-action="reset" style="flex: 1;">
-					Sweep More
+					Start another
 				</button>
 			</div>
 		</div>
 
-		<!-- Error Screen -->
+		<!-- Error screen -->
 		<div class="${CSS_PREFIX}-screen" data-screen="error">
+			<h3 class="${CSS_PREFIX}-complete-title" data-bind="errorTitle">Something went wrong</h3>
 			<div class="${CSS_PREFIX}-error-message" data-bind="errorMessage">
 				An error occurred.
 			</div>
 
 			<div class="${CSS_PREFIX}-form-group" data-bind="tokenInputContainer">
-				<label>Manual Token Entry</label>
-				<input type="password" data-input="manualToken" placeholder="Paste your Discord token...">
-				<p style="font-size: 11px; color: #6d6f78; margin-top: 8px;">
-					DevTools → Application → Local Storage → token
-				</p>
+				<label>Token</label>
+				<input type="password" data-input="manualToken" placeholder="Paste your Discord token">
+				<p class="${CSS_PREFIX}-field-hint">From DevTools: the Authorization header on any request Discord makes to its API</p>
 			</div>
 			<div class="${CSS_PREFIX}-btn-group">
 				<button class="${CSS_PREFIX}-btn ${CSS_PREFIX}-btn-primary" data-action="useManualToken" style="flex: 1;">
-					Use Token
+					Use this token
 				</button>
 				<button class="${CSS_PREFIX}-btn ${CSS_PREFIX}-btn-secondary" data-action="reset" style="flex: 1;">
-					Try Again
+					Start again
 				</button>
 			</div>
 		</div>

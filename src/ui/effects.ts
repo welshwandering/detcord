@@ -1,317 +1,223 @@
 /**
- * Visual Effects Module for Detcord
+ * Hold-to-confirm, the only authored motion in the interface.
  *
- * High-performance visual effects for celebration and feedback.
- * Uses requestAnimationFrame and CSS animations for smooth rendering.
+ * Deleting messages is irreversible, so the control that starts it asks for a
+ * deliberate, sustained gesture rather than a click. The fill is the feedback:
+ * it shows how much of the hold is left without moving or relabelling the
+ * button. Release, leaving the control, Escape, blur or the page being hidden
+ * all cancel; only a completed hold confirms.
  */
 
-/**
- * Discord-themed colors for confetti
- */
-const CONFETTI_COLORS = [
-  '#5865F2', // Blurple
-  '#57F287', // Green
-  '#FEE75C', // Yellow
-  '#EB459E', // Fuchsia
-  '#ED4245', // Red
-];
+/** How long the destructive button must be held before it confirms (ms). */
+export const HOLD_TO_CONFIRM_MS = 1500;
 
-/**
- * Creates a confetti celebration effect within a container.
- * Uses DocumentFragment for efficient DOM insertion and CSS animations.
- *
- * @param container - The HTML element to append confetti to
- * @param count - Number of confetti pieces (default: 30)
- * @param duration - Duration in ms before cleanup (default: 3000)
- */
-export function createConfetti(container: HTMLElement, count = 30, duration = 3000): void {
-  // Create container for confetti
-  const confettiContainer = document.createElement('div');
-  confettiContainer.className = 'confetti-container';
+/** How long the reduced-motion two-step confirmation stays armed (ms). */
+export const HOLD_REARM_WINDOW_MS = 4000;
 
-  // Use DocumentFragment for batch insertion
-  const fragment = document.createDocumentFragment();
+/** Label shown by the reduced-motion two-step confirmation. */
+export const HOLD_SECOND_STEP_LABEL = 'Press again to delete';
 
-  for (let i = 0; i < count; i++) {
-    const confetti = document.createElement('div');
-    confetti.className = 'confetti';
-
-    // Random horizontal position
-    const x = Math.random() * 100;
-    confetti.style.setProperty('--x', `${x}%`);
-
-    // Random animation delay for staggered effect
-    const delay = Math.random() * 0.5;
-    confetti.style.setProperty('--delay', `${delay}s`);
-
-    // Random color from Discord palette
-    const colorIndex = Math.floor(Math.random() * CONFETTI_COLORS.length);
-    confetti.style.backgroundColor = CONFETTI_COLORS[colorIndex] ?? '#5865F2';
-
-    // Random size variation
-    const size = 8 + Math.random() * 6;
-    confetti.style.width = `${size}px`;
-    confetti.style.height = `${size}px`;
-
-    fragment.appendChild(confetti);
-  }
-
-  confettiContainer.appendChild(fragment);
-  container.appendChild(confettiContainer);
-
-  // Clean up after animation completes
-  setTimeout(() => {
-    confettiContainer.remove();
-  }, duration);
+/** Options for {@link runHoldToConfirm}. */
+export interface HoldToConfirmOptions {
+  /** Called once the hold completes, or on the second reduced-motion press. */
+  onConfirm: () => void;
+  /** Hold duration in ms (default: {@link HOLD_TO_CONFIRM_MS}). */
+  durationMs?: number;
 }
 
 /**
- * Creates a screen shake effect on the specified element.
+ * Handle returned by {@link runHoldToConfirm}.
  *
- * @param element - The element to shake
- * @param duration - Duration in ms (default: 400)
+ * Calling it detaches every listener; `cancel()` abandons a hold in flight
+ * while leaving the control usable.
  */
-export function shakeElement(element: HTMLElement, duration = 400): Promise<void> {
-  return new Promise((resolve) => {
-    element.classList.add('shaking');
+export interface HoldToConfirmHandle {
+  (): void;
+  /** Abandons an in-flight hold or a pending second step. */
+  cancel: () => void;
+}
 
-    setTimeout(() => {
-      element.classList.remove('shaking');
-      resolve();
-    }, duration);
-  });
+/** Marks a button that {@link runHoldToConfirm} is driving. */
+const HOLD_CLASS = 'detcord-hold';
+
+/** Present only while the button is actually being held. */
+const HOLDING_CLASS = 'holding';
+
+/** Custom property the fill reads, 0 to 1. */
+const PROGRESS_PROPERTY = '--hold-progress';
+
+function prefersReducedMotion(): boolean {
+  const query = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+  return query?.matches === true;
+}
+
+function isActivationKey(key: string): boolean {
+  return key === ' ' || key === 'Spacebar' || key === 'Enter';
 }
 
 /**
- * Creates a flash effect overlay on the specified element.
+ * Turns a button into a hold-to-confirm control.
  *
- * @param container - The element to add the flash overlay to
- * @param duration - Duration in ms (default: 300)
- */
-export function flashElement(container: HTMLElement, duration = 300): Promise<void> {
-  return new Promise((resolve) => {
-    const flash = document.createElement('div');
-    flash.className = 'flash-overlay';
-    container.appendChild(flash);
-
-    setTimeout(() => {
-      flash.remove();
-      resolve();
-    }, duration);
-  });
-}
-
-/**
- * Runs a countdown animation sequence (3-2-1-BOOM).
+ * Under `prefers-reduced-motion: reduce` the hold is replaced by a two-step
+ * confirmation: the first press relabels the button and the second, within
+ * {@link HOLD_REARM_WINDOW_MS}, confirms.
  *
- * @param container - The container element to display countdown in
- * @param onComplete - Callback when countdown finishes
- * @returns Cleanup function to cancel the countdown
+ * @param button - The destructive button
+ * @param options - Confirmation callback and hold duration
+ * @returns A dispose function carrying a `cancel()` method
  */
-export function runCountdownSequence(container: HTMLElement, onComplete: () => void): () => void {
-  let cancelled = false;
-  const countdownOverlay = document.createElement('div');
-  countdownOverlay.className = 'detcord-countdown-overlay';
-  container.appendChild(countdownOverlay);
+export function runHoldToConfirm(
+  button: HTMLElement,
+  options: HoldToConfirmOptions,
+): HoldToConfirmHandle {
+  const duration = Math.max(1, options.durationMs ?? HOLD_TO_CONFIRM_MS);
+  let frameId: number | null = null;
+  let holdTimer: ReturnType<typeof setTimeout> | null = null;
+  let startedAt = 0;
+  let confirming = false;
+  let armedLabel: string | null = null;
+  let rearmTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const sequence = ['3', '2', '1', 'BOOM'];
-  const delays = [900, 900, 900, 500]; // ms between each step
+  button.classList.add(HOLD_CLASS);
+  button.style.setProperty(PROGRESS_PROPERTY, '0');
 
-  const runStep = (index: number): void => {
-    if (cancelled || index >= sequence.length) {
-      if (!cancelled) {
-        countdownOverlay.remove();
-        onComplete();
-      }
+  const clearFill = (): void => {
+    if (frameId !== null) {
+      cancelAnimationFrame(frameId);
+      frameId = null;
+    }
+    if (holdTimer !== null) {
+      clearTimeout(holdTimer);
+      holdTimer = null;
+    }
+    button.classList.remove(HOLDING_CLASS);
+    button.style.setProperty(PROGRESS_PROPERTY, '0');
+  };
+
+  const disarm = (): void => {
+    if (rearmTimer !== null) {
+      clearTimeout(rearmTimer);
+      rearmTimer = null;
+    }
+    if (armedLabel !== null) {
+      button.textContent = armedLabel;
+      armedLabel = null;
+    }
+  };
+
+  const cancel = (): void => {
+    clearFill();
+    disarm();
+  };
+
+  const confirm = (): void => {
+    if (confirming) {
       return;
     }
-
-    const value = sequence[index] ?? '';
-    const isBoom = value === 'BOOM';
-
-    // Clear previous content
-    countdownOverlay.innerHTML = '';
-
-    // Create countdown element
-    const countEl = document.createElement('div');
-    countEl.className = isBoom ? 'countdown-boom' : 'countdown-number';
-    countEl.textContent = isBoom ? '💥 BOOM' : value;
-    countdownOverlay.appendChild(countEl);
-
-    // Add shake effect on each number
-    shakeElement(container);
-
-    // If this is BOOM, add flash effect
-    if (isBoom) {
-      flashElement(container);
+    confirming = true;
+    cancel();
+    try {
+      options.onConfirm();
+    } finally {
+      confirming = false;
     }
-
-    // Schedule next step
-    setTimeout(() => runStep(index + 1), delays[index]);
   };
 
-  // Start the sequence
-  runStep(0);
-
-  // Return cleanup function
-  return () => {
-    cancelled = true;
-    countdownOverlay.remove();
-  };
-}
-
-/**
- * Status messages to rotate during deletion
- */
-export const STATUS_MESSAGES = [
-  // Classic
-  'Erasing evidence...',
-  'Gone. Reduced to atoms...',
-  'Making messages disappear...',
-  'Cleaning up the mess...',
-  'Scrubbing the timeline...',
-  'History? What history?',
-  'Deleting with extreme prejudice...',
-  'Messages go brrr...',
-  'Witness protection program activated...',
-  'Nothing to see here...',
-  'Vanishing into thin air...',
-  'Clearing the paper trail...',
-  'Memory hole activated...',
-  'Shredding the receipts...',
-  'Digital amnesia in progress...',
-
-  // Movie references
-  'I have a particular set of skills...',
-  'These are not the messages you seek...',
-  'Hasta la vista, messages...',
-  'You shall not pass... to the server...',
-  "I'll be back... to delete more...",
-  'Say hello to my little delete button...',
-  "You can't handle the deletion...",
-  "Here's Johnny... deleting stuff...",
-  'Run, messages. Run!',
-  'To delete, or not to delete...',
-
-  // Tech humor
-  'sudo rm -rf messages/*',
-  'git reset --hard origin/empty',
-  'DROP TABLE messages;',
-  'Garbage collection in progress...',
-  'Defragmenting your past...',
-  '/dev/null is hungry...',
-  'Bit by bit, byte by byte...',
-  'Recursively removing regrets...',
-  'Purging the cache of shame...',
-  'malloc failed: no space for cringe...',
-
-  // Dramatic
-  'The cleansing has begun...',
-  'Reducing digital footprint...',
-  'Scorched earth protocol active...',
-  'Purification in progress...',
-  'Dawn of a new timeline...',
-  'Rising from the ashes...',
-  'Rewriting history...',
-  'The great purge continues...',
-
-  // Casual/Funny
-  'Oops, did I delete that?',
-  'Messages? What messages?',
-  'Spring cleaning, Discord edition...',
-  'Making Marie Kondo proud...',
-  'This sparks no joy... deleted!',
-  'Yeeting messages into the void...',
-  'Sending to /dev/null...',
-  'Poof! Gone!',
-  'And just like that... gone.',
-  'Magic tricks with data...',
-  'Abracadabra... disappearo!',
-  'Thanos snapping messages...',
-  "I don't remember posting that...",
-  'What happens in Discord stays... deleted',
-  'Ctrl+Z? Never heard of her...',
-
-  // Progress updates
-  'Still going strong...',
-  'No rest for the wicked...',
-  'On a roll here...',
-  'Making good progress...',
-  'Almost there... probably...',
-  'Keep calm and delete on...',
-  'One message at a time...',
-  'Patience, young grasshopper...',
-
-  // Philosophical
-  'To exist is temporary...',
-  'All things must pass...',
-  'Entropy always wins...',
-  'Nothing lasts forever...',
-  'Change is the only constant...',
-  'Let go of the past...',
-  'New beginnings require endings...',
-
-  // Misc
-  'Beep boop, messages go poof...',
-  'Cleaning up after past you...',
-  'Future you will thank me...',
-  'The void welcomes all...',
-  'Processing regret removal...',
-  'Sanitizing the timeline...',
-  'Removing evidence of existence...',
-  'Making room for new mistakes...',
-  'Out with the old...',
-  'Decluttering your digital life...',
-  'Memory? What memory?',
-  'The internet forgets nothing... except this.',
-  'Removing traces of 3am you...',
-  'Your secrets are safe... nowhere.',
-  'Deleting faster than you can type...',
-];
-
-/**
- * Creates a rotating status message manager.
- * Cycles through messages with fade animation.
- *
- * @param element - The element to update with status messages
- * @param intervalMs - Interval between message changes (default: 3000)
- * @returns Object with start() and stop() methods
- */
-export function createStatusRotator(
-  element: HTMLElement,
-  intervalMs = 3000,
-): { start: () => void; stop: () => void } {
-  let intervalId: number | null = null;
-  let currentIndex = 0;
-
-  const updateMessage = (): void => {
-    // Trigger fade animation
-    element.classList.remove('rotating');
-    // Force reflow to restart animation
-    void element.offsetWidth;
-    element.classList.add('rotating');
-
-    // Update text
-    element.textContent = STATUS_MESSAGES[currentIndex] ?? STATUS_MESSAGES[0] ?? '';
-
-    // Move to next message
-    currentIndex = (currentIndex + 1) % STATUS_MESSAGES.length;
+  // The frames paint the fill; the timer decides. Keeping the commitment off
+  // the frame clock means a throttled tab cannot stretch or shorten the hold.
+  const tick = (): void => {
+    const progress = Math.min(1, (Date.now() - startedAt) / duration);
+    button.style.setProperty(PROGRESS_PROPERTY, String(progress));
+    frameId = progress < 1 ? requestAnimationFrame(tick) : null;
   };
 
-  return {
-    start: () => {
-      // Show first message immediately
-      updateMessage();
-
-      // Start rotation
-      intervalId = window.setInterval(updateMessage, intervalMs);
-    },
-    stop: () => {
-      if (intervalId !== null) {
-        clearInterval(intervalId);
-        intervalId = null;
-      }
-      element.classList.remove('rotating');
-    },
+  /** The reduced-motion path: press once to arm, again to confirm. */
+  const stepConfirm = (): void => {
+    if (armedLabel !== null) {
+      confirm();
+      return;
+    }
+    armedLabel = button.textContent ?? '';
+    button.textContent = HOLD_SECOND_STEP_LABEL;
+    rearmTimer = setTimeout(disarm, HOLD_REARM_WINDOW_MS);
   };
+
+  const begin = (): void => {
+    if (button.hasAttribute('disabled') || holdTimer !== null) {
+      return;
+    }
+    if (prefersReducedMotion()) {
+      stepConfirm();
+      return;
+    }
+    startedAt = Date.now();
+    button.classList.add(HOLDING_CLASS);
+    button.style.setProperty(PROGRESS_PROPERTY, '0');
+    holdTimer = setTimeout(confirm, duration);
+    frameId = requestAnimationFrame(tick);
+  };
+
+  const handlePointerDown = (event: Event): void => {
+    if ((event as MouseEvent).button > 0) {
+      return;
+    }
+    begin();
+  };
+
+  const handleKeyDown = (event: KeyboardEvent): void => {
+    if (event.repeat || !isActivationKey(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    begin();
+  };
+
+  const handleKeyUp = (event: KeyboardEvent): void => {
+    if (isActivationKey(event.key)) {
+      clearFill();
+    }
+  };
+
+  const handleEscape = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape') {
+      cancel();
+    }
+  };
+
+  const handleVisibility = (): void => {
+    if (document.hidden) {
+      cancel();
+    }
+  };
+
+  button.addEventListener('pointerdown', handlePointerDown);
+  button.addEventListener('pointerup', clearFill);
+  button.addEventListener('pointerleave', clearFill);
+  button.addEventListener('pointercancel', clearFill);
+  button.addEventListener('keydown', handleKeyDown);
+  button.addEventListener('keyup', handleKeyUp);
+  button.addEventListener('blur', cancel);
+  document.addEventListener('keydown', handleEscape);
+  document.addEventListener('visibilitychange', handleVisibility);
+  window.addEventListener('blur', cancel);
+
+  const dispose = (): void => {
+    cancel();
+    button.classList.remove(HOLD_CLASS);
+    button.style.removeProperty(PROGRESS_PROPERTY);
+    button.removeEventListener('pointerdown', handlePointerDown);
+    button.removeEventListener('pointerup', clearFill);
+    button.removeEventListener('pointerleave', clearFill);
+    button.removeEventListener('pointercancel', clearFill);
+    button.removeEventListener('keydown', handleKeyDown);
+    button.removeEventListener('keyup', handleKeyUp);
+    button.removeEventListener('blur', cancel);
+    document.removeEventListener('keydown', handleEscape);
+    document.removeEventListener('visibilitychange', handleVisibility);
+    window.removeEventListener('blur', cancel);
+  };
+
+  const handle = dispose as HoldToConfirmHandle;
+  handle.cancel = cancel;
+  return handle;
 }

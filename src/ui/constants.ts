@@ -20,12 +20,6 @@ export const DEFAULT_FEED_THROTTLE_MS = 50;
 /** Maximum characters shown for a message preview in the live feed. */
 export const MAX_PREVIEW_LENGTH = 80;
 
-/** Radius of the large progress ring circle in the running screen. */
-export const PROGRESS_RING_RADIUS = 52;
-
-/** Radius of the small progress ring shown when the window is minimised. */
-export const MINI_RING_RADIUS = 20;
-
 /**
  * Whether the oldest-first deletion order is offered in the wizard.
  *

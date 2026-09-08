@@ -1,9 +1,10 @@
 /**
  * Progress and completion view.
  *
- * Renders the running screen (ring, counters, live feed, throttle notice) and
- * the completion screen. Everything dynamic is written with `textContent`, so
- * message content and error text can never be interpreted as markup.
+ * Renders the running screen as one instrument - a status line, a large count,
+ * a thin bar, three small figures and a plain log - and the completion screen
+ * as a receipt. Everything dynamic is written with `textContent`, so message
+ * content and error text can never be interpreted as markup.
  */
 
 import { formatDuration } from '../utils/helpers';
@@ -13,13 +14,7 @@ import {
   throttle,
   trimChildren,
 } from '../utils/performance';
-import {
-  CSS_PREFIX,
-  MAX_PREVIEW_LENGTH,
-  MINI_RING_RADIUS,
-  PROGRESS_RING_RADIUS,
-} from './constants';
-import { createConfetti } from './effects';
+import { CSS_PREFIX, MAX_PREVIEW_LENGTH } from './constants';
 import type { MessageOutcome } from './ports';
 import type { ChannelPosition, RunProgress, RunSummary } from './runner';
 
@@ -29,6 +24,8 @@ export interface FeedEntry {
   content: string;
   status: MessageOutcome['status'];
   reason?: string | undefined;
+  /** When the message was processed; defaults to now. */
+  at?: number | undefined;
 }
 
 /** Tuning knobs, mirrored from the controller options. */
@@ -38,21 +35,24 @@ export interface ProgressViewOptions {
   feedThrottleMs: number;
 }
 
+/** One row of the completion receipt. */
+export interface ReceiptRow {
+  label: string;
+  value: string;
+}
+
 interface ProgressElements {
-  ring: SVGCircleElement | null;
   bar: HTMLElement | null;
-  percent: HTMLElement | null;
   count: HTMLElement | null;
+  status: HTMLElement | null;
   deleted: HTMLElement | null;
   failed: HTMLElement | null;
   skipped: HTMLElement | null;
-  rate: HTMLElement | null;
+  alreadyGone: HTMLElement | null;
+  alreadyGoneFigure: HTMLElement | null;
   eta: HTMLElement | null;
   elapsed: HTMLElement | null;
-  currentMessage: HTMLElement | null;
   channelProgress: HTMLElement | null;
-  throttleInfo: HTMLElement | null;
-  throttleCount: HTMLElement | null;
   feed: HTMLElement | null;
 }
 
@@ -63,17 +63,11 @@ const FEED_LABELS: Record<MessageOutcome['status'], string> = {
   failed: 'failed',
 };
 
-const COMPLETION_TITLES: Record<RunSummary['reason'], string> = {
-  completed: 'All clean!',
-  stopped: 'Stopped by you',
-  error: 'Stopped by an error',
-};
+/** Shown while the engine is deleting and has nothing more specific to say. */
+const DEFAULT_STATUS = 'Deleting…';
 
-const COMPLETION_ICONS: Record<RunSummary['reason'], string> = {
-  completed: '\u2728',
-  stopped: '\u270B',
-  error: '\u26A0\uFE0F',
-};
+/** Ellipsis appended to a truncated message body. */
+const ELLIPSIS = '…';
 
 /**
  * Titles a finished run by what actually happened to the messages.
@@ -85,31 +79,54 @@ const COMPLETION_ICONS: Record<RunSummary['reason'], string> = {
  * @returns The heading for the completion screen
  */
 export function completionTitle(summary: RunSummary): string {
-  if (summary.reason !== 'completed') {
-    return COMPLETION_TITLES[summary.reason];
+  if (summary.reason === 'error') {
+    return 'Stopped by an error';
+  }
+  if (summary.reason === 'stopped') {
+    return `Stopped after ${summary.deleted}`;
   }
   if (summary.failed > 0) {
-    return 'Finished with failures';
+    return `${summary.failed} could not be deleted`;
   }
   if (summary.skipped > 0) {
-    return 'Finished, some skipped';
+    return `Finished, ${summary.skipped} skipped`;
   }
-  return COMPLETION_TITLES.completed;
+  return `${summary.deleted} deleted`;
 }
 
 /**
- * Lists every outcome of a finished run.
+ * Lists every outcome of a finished run as receipt rows.
  *
  * @param summary - How the run ended
- * @returns One dot-separated phrase per counter that applies
+ * @returns Label and value pairs, in reading order
  */
-export function completionCounts(summary: RunSummary): string {
-  const parts = [`${summary.deleted} deleted`];
+export function completionReceipt(summary: RunSummary): ReceiptRow[] {
+  const rows: ReceiptRow[] = [{ label: 'Deleted', value: String(summary.deleted) }];
   if (summary.alreadyGone > 0) {
-    parts.push(`${summary.alreadyGone} already gone`);
+    rows.push({ label: 'Already gone', value: String(summary.alreadyGone) });
   }
-  parts.push(`${summary.skipped} skipped`, `${summary.failed} failed`);
-  return parts.join(' \u00B7 ');
+  rows.push(
+    { label: 'Skipped', value: String(summary.skipped) },
+    { label: 'Failed', value: String(summary.failed) },
+    { label: 'Duration', value: formatDuration(summary.durationMs) },
+  );
+  if (summary.channelCount > 1) {
+    rows.push({
+      label: 'Channels',
+      value: `${summary.channelsCompleted} of ${summary.channelCount}`,
+    });
+  }
+  return rows;
+}
+
+/**
+ * Names the wait the engine is currently serving.
+ *
+ * @param delayMs - Delay between deletions in ms
+ * @returns A status line stating what is being waited on
+ */
+export function rateLimitStatus(delayMs: number): string {
+  return `Waiting ${Math.max(1, Math.round(delayMs / 1000))} s for Discord's rate limit`;
 }
 
 /** Renders deletion progress into the running and completion screens. */
@@ -123,6 +140,9 @@ export class ProgressView {
   private pendingFeed: FeedEntry[] = [];
   private percent = 0;
   private miniIndicator: HTMLElement | null = null;
+  private engineStatus: string | undefined;
+  private throttleStatus: string | undefined;
+  private paused = false;
 
   constructor(options: ProgressViewOptions) {
     this.options = options;
@@ -142,36 +162,36 @@ export class ProgressView {
   attach(root: ParentNode): void {
     this.root = root;
     this.elements = {
-      ring: root.querySelector('[data-bind="progressRing"]'),
       bar: root.querySelector('[data-bind="progressBar"]'),
-      percent: root.querySelector('[data-bind="progressPercent"]'),
       count: root.querySelector('[data-bind="progressCount"]'),
+      status: root.querySelector('[data-bind="statusMessage"]'),
       deleted: root.querySelector('[data-bind="deletedCount"]'),
       failed: root.querySelector('[data-bind="failedCount"]'),
       skipped: root.querySelector('[data-bind="skippedCount"]'),
-      rate: root.querySelector('[data-bind="rateValue"]'),
+      alreadyGone: root.querySelector('[data-bind="alreadyGone"]'),
+      alreadyGoneFigure: root.querySelector('[data-bind="alreadyGoneFigure"]'),
       eta: root.querySelector('[data-bind="eta"]'),
       elapsed: root.querySelector('[data-bind="elapsedTime"]'),
-      currentMessage: root.querySelector('[data-bind="currentMessage"]'),
       channelProgress: root.querySelector('[data-bind="channelProgress"]'),
-      throttleInfo: root.querySelector('[data-bind="throttleInfo"]'),
-      throttleCount: root.querySelector('[data-bind="throttleCount"]'),
       feed: root.querySelector('[data-bind="feed"]'),
     };
   }
 
-  /** Registers the minimised indicator so its ring can be kept in step. */
+  /** Registers the minimised indicator so its count can be kept in step. */
   setMiniIndicator(element: HTMLElement | null): void {
     this.miniIndicator = element;
   }
 
-  /** Clears counters, feed and any leftover throttle notice. */
+  /** Clears counters, feed and any leftover wait notice. */
   reset(): void {
     this.throttledRender.cancel();
     this.throttledFeedFlush.cancel();
     this.feedEntries.clear();
     this.pendingFeed = [];
     this.percent = 0;
+    this.engineStatus = undefined;
+    this.throttleStatus = undefined;
+    this.paused = false;
 
     const els = this.elements;
     if (!els) {
@@ -180,20 +200,19 @@ export class ProgressView {
     if (els.feed) {
       els.feed.textContent = '';
     }
-    this.setText(els.percent, '0%');
-    this.setText(els.count, '0 / 0');
+    this.setText(els.count, '0 of 0');
     this.setText(els.deleted, '0');
     this.setText(els.failed, '0');
     this.setText(els.skipped, '0');
-    this.setText(els.rate, '0');
+    this.setText(els.alreadyGone, '0');
     this.setText(els.eta, '--:--');
     this.setText(els.elapsed, '0s');
-    this.setText(els.currentMessage, 'Starting...');
     this.setText(els.channelProgress, '');
-    if (els.throttleInfo) {
-      els.throttleInfo.style.display = 'none';
+    if (els.bar) {
+      els.bar.style.width = '0%';
     }
-    this.root?.querySelector(`[data-screen="running"] .${CSS_PREFIX}-waiting`)?.remove();
+    els.alreadyGoneFigure?.classList.add(`${CSS_PREFIX}-run-figure-hidden`);
+    this.renderStatus();
   }
 
   /**
@@ -213,8 +232,8 @@ export class ProgressView {
    * Records a processed message and schedules a throttled repaint.
    *
    * @param progress - Aggregated run progress
-   * @param content - Message content
    * @param messageId - Message ID
+   * @param content - Message content
    * @param outcome - What happened to that message
    */
   push(progress: RunProgress, messageId: string, content: string, outcome: MessageOutcome): void {
@@ -223,57 +242,43 @@ export class ProgressView {
       content,
       status: outcome.status,
       reason: outcome.reason,
+      at: Date.now(),
     };
     this.feedEntries.push(entry);
     this.pendingFeed.push(entry);
     this.throttledFeedFlush();
-    this.setText(
-      this.elements?.currentMessage ?? null,
-      truncate(content || '[No text content]', 50),
-    );
     this.throttledRender(progress);
   }
 
   /**
-   * Shows or clears the engine's status line (e.g. "Finding oldest message").
+   * Shows or clears the engine's own status line.
    *
-   * @param status - Status text, or undefined to clear
+   * @param status - Status text, or undefined to fall back to the default
    */
   setStatus(status: string | undefined): void {
-    const el = this.elements?.currentMessage;
-    if (!el) {
-      return;
-    }
-    if (status) {
-      el.textContent = status;
-      el.classList.add(`${CSS_PREFIX}-status-searching`);
-    } else {
-      el.classList.remove(`${CSS_PREFIX}-status-searching`);
-    }
+    this.engineStatus = status;
+    this.renderStatus();
   }
 
   /**
-   * Shows or hides the rate-limit notice.
+   * Records whether the run is paused, which the status line reports.
+   *
+   * @param paused - Whether the engine is paused
+   */
+  setPaused(paused: boolean): void {
+    this.paused = paused;
+    this.renderStatus();
+  }
+
+  /**
+   * Shows or clears the rate-limit wait in the status line.
    *
    * @param isThrottled - Whether the engine is currently throttled
    * @param currentDelay - Delay between deletes in ms
    */
   setThrottleState(isThrottled: boolean, currentDelay: number): void {
-    const runningScreen = this.root?.querySelector('[data-screen="running"]');
-    if (!runningScreen) {
-      return;
-    }
-    const existing = runningScreen.querySelector(`.${CSS_PREFIX}-waiting`);
-    if (!isThrottled) {
-      existing?.remove();
-      return;
-    }
-    const notice = (existing as HTMLElement | null) ?? document.createElement('div');
-    notice.className = `${CSS_PREFIX}-waiting`;
-    notice.textContent = `Rate limited - waiting ${Math.round(currentDelay / 1000)}s between deletes`;
-    if (!existing) {
-      this.elements?.eta?.insertAdjacentElement('afterend', notice);
-    }
+    this.throttleStatus = isThrottled ? rateLimitStatus(currentDelay) : undefined;
+    this.renderStatus();
   }
 
   /** Flushes any throttled work so the final numbers are on screen. */
@@ -296,37 +301,24 @@ export class ProgressView {
     if (!root) {
       return;
     }
-    this.setBoundText(root, 'completeIcon', COMPLETION_ICONS[summary.reason]);
     this.setBoundText(root, 'completeTitle', completionTitle(summary));
-    this.setBoundText(root, 'completeSummary', completionCounts(summary));
-    this.setBoundText(root, 'completeDuration', `in ${formatDuration(summary.durationMs)}`);
+    this.renderReceipt(root, completionReceipt(summary));
 
     const detail = root.querySelector<HTMLElement>('[data-bind="completeDetail"]');
     if (detail) {
-      const message =
-        summary.reason === 'error'
-          ? (summary.error?.message ?? 'Unknown error')
-          : summary.channelCount > 1
-            ? `${summary.channelsCompleted} of ${summary.channelCount} channels finished`
-            : '';
+      const message = summary.reason === 'error' ? (summary.error?.message ?? 'Unknown error') : '';
       detail.textContent = message;
       detail.style.display = message ? 'block' : 'none';
     }
 
-    if (
-      summary.reason === 'completed' &&
-      summary.deleted > 0 &&
-      summary.skipped === 0 &&
-      summary.failed === 0
-    ) {
-      const container = root.querySelector<HTMLElement>('[data-bind="confettiContainer"]');
-      if (container) {
-        createConfetti(container, 30);
-      }
+    // A run that did not finish leaves a checkpoint behind to resume from.
+    const note = root.querySelector<HTMLElement>('[data-bind="completeResumeNote"]');
+    if (note) {
+      note.style.display = summary.reason === 'completed' ? 'none' : 'block';
     }
   }
 
-  /** Current progress percentage, used by the minimised indicator. */
+  /** Current progress percentage, used by the bar and the minimised pill. */
   getPercent(): number {
     return this.percent;
   }
@@ -356,36 +348,40 @@ export class ProgressView {
     const total = Math.max(state.initialTotalFound || state.totalFound || processed, 1);
     this.percent = Math.min(100, Math.round((processed / total) * 100));
 
-    this.renderRing(els, this.percent);
-    this.setText(els.percent, `${this.percent}%`);
-    this.setText(els.count, `${processed} / ${total}`);
+    this.setText(els.count, `${processed} of ${total}`);
+    if (els.bar) {
+      els.bar.style.width = `${this.percent}%`;
+    }
     this.setText(els.deleted, String(totals.deleted));
     this.setText(els.failed, String(totals.failed));
-    this.setText(els.skipped, String(totals.skipped + totals.alreadyGone));
-    this.renderTimes(els, stats, totals.deleted);
-    this.renderThrottle(els, stats);
-    this.renderMini(this.percent);
+    this.setText(els.skipped, String(totals.skipped));
+    this.renderAlreadyGone(els, totals.alreadyGone);
+    this.renderTimes(els, stats);
+    this.renderMini(processed, total);
   }
 
-  private renderRing(els: ProgressElements, percent: number): void {
-    if (els.ring) {
-      const circumference = 2 * Math.PI * PROGRESS_RING_RADIUS;
-      els.ring.style.strokeDasharray = String(circumference);
-      els.ring.style.strokeDashoffset = String(circumference - (percent / 100) * circumference);
+  private renderAlreadyGone(els: ProgressElements, alreadyGone: number): void {
+    this.setText(els.alreadyGone, String(alreadyGone));
+    els.alreadyGoneFigure?.classList.toggle(`${CSS_PREFIX}-run-figure-hidden`, alreadyGone === 0);
+  }
+
+  private renderStatus(): void {
+    const el = this.elements?.status;
+    if (!el) {
+      return;
     }
-    if (els.bar) {
-      els.bar.style.width = `${percent}%`;
+    if (this.paused) {
+      el.textContent = 'Paused';
+      return;
     }
+    el.textContent = this.throttleStatus ?? this.engineStatus ?? DEFAULT_STATUS;
   }
 
   private renderTimes(
     els: ProgressElements,
     stats: { startTime: number; estimatedTimeRemaining: number },
-    deleted: number,
   ): void {
     const elapsed = stats.startTime > 0 ? Date.now() - stats.startTime : 0;
-    const elapsedMinutes = elapsed / 60000;
-    this.setText(els.rate, String(elapsedMinutes > 0 ? Math.round(deleted / elapsedMinutes) : 0));
     this.setText(els.elapsed, formatDuration(elapsed));
     this.setText(
       els.eta,
@@ -393,37 +389,24 @@ export class ProgressView {
     );
   }
 
-  private renderThrottle(
-    els: ProgressElements,
-    stats: { throttledCount: number; throttledTime: number },
-  ): void {
-    if (stats.throttledCount <= 0) {
-      return;
+  private renderMini(processed: number, total: number): void {
+    const countEl = this.miniIndicator?.querySelector<HTMLElement>('[data-bind="miniCount"]');
+    if (countEl) {
+      countEl.textContent = `${processed} / ${total}`;
     }
-    if (els.throttleInfo) {
-      els.throttleInfo.style.display = 'flex';
-    }
-    this.setText(
-      els.throttleCount,
-      `${stats.throttledCount}x (${formatDuration(stats.throttledTime)})`,
-    );
   }
 
-  private renderMini(percent: number): void {
-    const indicator = this.miniIndicator;
-    if (!indicator) {
+  private renderReceipt(root: ParentNode, rows: ReceiptRow[]): void {
+    const container = root.querySelector<HTMLElement>('[data-bind="completeReceipt"]');
+    if (!container) {
       return;
     }
-    const ring = indicator.querySelector<SVGCircleElement>('[data-bind="miniRing"]');
-    if (ring) {
-      const circumference = 2 * Math.PI * MINI_RING_RADIUS;
-      ring.style.strokeDasharray = String(circumference);
-      ring.style.strokeDashoffset = String(circumference - (percent / 100) * circumference);
+    container.textContent = '';
+    const fragment = document.createDocumentFragment();
+    for (const row of rows) {
+      fragment.appendChild(createReceiptRow(row));
     }
-    const percentEl = indicator.querySelector<HTMLElement>('[data-bind="miniPercent"]');
-    if (percentEl) {
-      percentEl.textContent = `${percent}%`;
-    }
+    container.appendChild(fragment);
   }
 
   private flushFeed(): void {
@@ -456,21 +439,79 @@ export class ProgressView {
 }
 
 function truncate(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max)}...` : value;
+  return value.length > max ? `${value.slice(0, max)}${ELLIPSIS}` : value;
+}
+
+function pad(value: number): string {
+  return String(value).padStart(2, '0');
 }
 
 /**
- * Builds one live-feed row.
+ * Formats a log row's time column.
+ *
+ * @param at - Epoch milliseconds
+ * @returns The local time as HH:MM:SS
+ */
+export function formatLogTime(at: number): string {
+  const date = new Date(at);
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+/**
+ * Names an outcome for the log, with its reason when there is one.
  *
  * @param entry - The processed message
- * @returns A styled element describing the outcome
+ * @returns Words such as "deleted" or "skipped \u00B7 pinned"
+ */
+export function feedOutcomeLabel(entry: FeedEntry): string {
+  const label = FEED_LABELS[entry.status];
+  return entry.reason ? `${label} \u00B7 ${entry.reason}` : label;
+}
+
+/**
+ * Builds one row of the completion receipt.
+ *
+ * @param row - Label and value
+ * @returns A row element on the receipt grid
+ */
+export function createReceiptRow(row: ReceiptRow): HTMLElement {
+  const el = document.createElement('div');
+  el.className = `${CSS_PREFIX}-receipt-row`;
+  const label = document.createElement('span');
+  label.className = `${CSS_PREFIX}-receipt-label`;
+  label.textContent = row.label;
+  const value = document.createElement('span');
+  value.className = `${CSS_PREFIX}-receipt-value`;
+  value.textContent = row.value;
+  el.appendChild(label);
+  el.appendChild(value);
+  return el;
+}
+
+/**
+ * Builds one live-log row: time, outcome, then the message text.
+ *
+ * @param entry - The processed message
+ * @returns A row element describing the outcome
  */
 export function createFeedElement(entry: FeedEntry): HTMLElement {
   const el = document.createElement('div');
-  el.className = `${CSS_PREFIX}-feed-entry ${CSS_PREFIX}-feed-${entry.status.replace('_', '-')}`;
-  const label = entry.reason
-    ? `${FEED_LABELS[entry.status]}: ${entry.reason}`
-    : FEED_LABELS[entry.status];
-  el.textContent = `[${label}] ${truncate(entry.content || '[No content]', MAX_PREVIEW_LENGTH)}`;
+  el.className = `${CSS_PREFIX}-feed-entry ${CSS_PREFIX}-log-row ${CSS_PREFIX}-feed-${entry.status.replace('_', '-')}`;
+
+  const time = document.createElement('span');
+  time.className = `${CSS_PREFIX}-log-time`;
+  time.textContent = formatLogTime(entry.at ?? Date.now());
+
+  const outcome = document.createElement('span');
+  outcome.className = `${CSS_PREFIX}-log-outcome`;
+  outcome.textContent = feedOutcomeLabel(entry);
+
+  const text = document.createElement('span');
+  text.className = `${CSS_PREFIX}-log-text`;
+  text.textContent = truncate(entry.content || '[No content]', MAX_PREVIEW_LENGTH);
+
+  el.appendChild(time);
+  el.appendChild(outcome);
+  el.appendChild(text);
   return el;
 }

@@ -7,19 +7,27 @@ export { ChannelPicker } from './channel-picker';
 export type { DetcordUIOptions, ScreenId } from './controller';
 export { DetcordUI } from './controller';
 
-// Effects exports
+// Hold-to-confirm
+export type { HoldToConfirmHandle, HoldToConfirmOptions } from './effects';
 export {
-  createConfetti,
-  createStatusRotator,
-  flashElement,
-  runCountdownSequence,
-  STATUS_MESSAGES,
-  shakeElement,
+  HOLD_REARM_WINDOW_MS,
+  HOLD_SECOND_STEP_LABEL,
+  HOLD_TO_CONFIRM_MS,
+  runHoldToConfirm,
 } from './effects';
 
 // Progress and completion view
-export type { FeedEntry, ProgressViewOptions } from './progress-view';
-export { createFeedElement, ProgressView } from './progress-view';
+export type { FeedEntry, ProgressViewOptions, ReceiptRow } from './progress-view';
+export {
+  completionReceipt,
+  completionTitle,
+  createFeedElement,
+  createReceiptRow,
+  feedOutcomeLabel,
+  formatLogTime,
+  ProgressView,
+  rateLimitStatus,
+} from './progress-view';
 
 // Run configuration
 export type { RunConfig, RunConfigInput, RunConfigResult, TargetScope } from './run-config';

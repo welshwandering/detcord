@@ -30,7 +30,7 @@ const CHANNEL = '111111111111111111';
 const CHANNEL_B = '222222222222222222';
 const CHANNEL_C = '333333333333333333';
 const ROUTE = `/channels/${GUILD}/${CHANNEL}`;
-const COUNTDOWN_MS = 3400;
+const HOLD_MS = 1500;
 
 function message(id: string, content = `content ${id}`): DiscordMessage {
   return {
@@ -192,8 +192,34 @@ function boundText(binding: string): string {
   return document.querySelector(`[data-bind="${binding}"]`)?.textContent ?? '';
 }
 
+/** Reads one value off the completion receipt by its label. */
+function receiptValue(label: string): string {
+  const rows = document.querySelectorAll('[data-bind="completeReceipt"] .detcord-receipt-row');
+  for (const row of rows) {
+    if (row.firstElementChild?.textContent === label) {
+      return row.lastElementChild?.textContent ?? '';
+    }
+  }
+  return '';
+}
+
 function confirmButton(): HTMLButtonElement {
   return document.querySelector('[data-bind="confirmButton"]') as HTMLButtonElement;
+}
+
+/** jsdom has no PointerEvent, and the hold only listens for the name. */
+function pressConfirm(): void {
+  confirmButton().dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+}
+
+function releaseConfirm(): void {
+  confirmButton().dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
+}
+
+/** Holds the destructive button for the full 1.5 seconds. */
+async function confirmDelete(): Promise<void> {
+  pressConfirm();
+  await flush(HOLD_MS);
 }
 
 /** Engines the runner drove: only those get callbacks wired up. */
@@ -530,8 +556,7 @@ describe('DetcordUI', () => {
       ui.show();
       await flush();
       await gotoReview();
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
 
       const before = getCurrentUserSpy.mock.calls.length;
       clickAction('close');
@@ -556,8 +581,7 @@ describe('DetcordUI', () => {
       await flush();
 
       expect(confirmButton().hasAttribute('disabled')).toBe(true);
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
       expect(startedEngines()).toHaveLength(0);
     });
   });
@@ -582,8 +606,7 @@ describe('DetcordUI', () => {
         channelId: CHANNEL,
       });
 
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
 
       const run = startedEngines()[0];
       expect(run).toBeDefined();
@@ -617,8 +640,7 @@ describe('DetcordUI', () => {
       expect(boundText('reviewError')).toBe('Search index is being built');
       expect(boundText('reviewCount')).toBe('?');
 
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
       expect(startedEngines()).toHaveLength(0);
     });
 
@@ -724,7 +746,7 @@ describe('DetcordUI', () => {
   });
 
   // =========================================================================
-  // Invalidation and the countdown
+  // Invalidation and the hold to confirm
   // =========================================================================
 
   describe('confirmation safety', () => {
@@ -739,8 +761,7 @@ describe('DetcordUI', () => {
       window.history.pushState({}, '', `/channels/${GUILD}/${CHANNEL_B}`);
       vi.mocked(getChannelIdFromUrl).mockReturnValue(CHANNEL_B);
 
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
 
       expect(startedEngines()).toHaveLength(0);
       expect(boundText('locationError')).toMatch(/navigated to a different channel/);
@@ -749,47 +770,62 @@ describe('DetcordUI', () => {
       ).toBe(true);
     });
 
-    it('cancels the countdown when the route changes mid-count', async () => {
+    it('does not start when the hold is released early', async () => {
+      pressConfirm();
+      await flush(800);
+      expect(confirmButton().classList.contains('holding')).toBe(true);
+      releaseConfirm();
+      await flush(HOLD_MS);
+
+      expect(startedEngines()).toHaveLength(0);
+      expect(confirmButton().classList.contains('holding')).toBe(false);
+    });
+
+    it('does not start on a plain click', async () => {
       clickAction('confirmDelete');
+      await flush(HOLD_MS);
+      expect(startedEngines()).toHaveLength(0);
+    });
+
+    it('cancels the hold when the route changes mid-hold', async () => {
+      pressConfirm();
       await flush(500);
       window.history.pushState({}, '', `/channels/${GUILD}/${CHANNEL_B}`);
       vi.mocked(getChannelIdFromUrl).mockReturnValue(CHANNEL_B);
-      await flush(COUNTDOWN_MS);
+      await flush(HOLD_MS);
 
       expect(startedEngines()).toHaveLength(0);
-      expect(document.querySelector('.detcord-countdown-overlay')).toBeNull();
+      expect(confirmButton().classList.contains('holding')).toBe(false);
     });
 
-    it('ignores a second click while the countdown runs', async () => {
-      clickAction('confirmDelete');
-      clickAction('confirmDelete');
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+    it('ignores a second press while the hold runs', async () => {
+      pressConfirm();
+      pressConfirm();
+      await confirmDelete();
       expect(startedEngines()).toHaveLength(1);
     });
 
-    it('cancels the countdown when the window is closed', async () => {
-      clickAction('confirmDelete');
+    it('cancels the hold when the window is closed', async () => {
+      pressConfirm();
       await flush(500);
       ui.hide();
-      await flush(COUNTDOWN_MS);
+      await flush(HOLD_MS);
       expect(startedEngines()).toHaveLength(0);
-      expect(document.querySelector('.detcord-countdown-overlay')).toBeNull();
+      expect(confirmButton().classList.contains('holding')).toBe(false);
     });
 
-    it('cancels the countdown when the wizard is reset', async () => {
-      clickAction('confirmDelete');
+    it('cancels the hold when the wizard is reset', async () => {
+      pressConfirm();
       await flush(500);
       clickAction('reset');
-      await flush(COUNTDOWN_MS);
+      await flush(HOLD_MS);
       expect(startedEngines()).toHaveLength(0);
     });
 
-    it('does nothing when Begin Sweep is clicked with no reviewed config', async () => {
+    it('does nothing when the button is held with no reviewed config', async () => {
       clickAction('reset');
       await flush();
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
       expect(startedEngines()).toHaveLength(0);
     });
   });
@@ -813,12 +849,11 @@ describe('DetcordUI', () => {
       await gotoReview();
       expect(boundText('previewContent')).toContain('preview sample');
 
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
 
       expect(ui.getCurrentScreen()).toBe('complete');
-      expect(boundText('completeTitle')).toBe('All clean!');
-      expect(boundText('completeSummary')).toContain('2 deleted');
+      expect(boundText('completeTitle')).toBe('2 deleted');
+      expect(receiptValue('Deleted')).toBe('2');
     });
 
     it('renders failed and skipped outcomes distinctly', async () => {
@@ -828,31 +863,30 @@ describe('DetcordUI', () => {
         [message('c'), { status: 'skipped', reason: 'pinned' }],
       ];
       await gotoReview();
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
 
       const feed = document.querySelector('[data-bind="feed"]')?.textContent ?? '';
-      expect(feed).toContain('[deleted]');
-      expect(feed).toContain('[failed: Missing Access]');
-      expect(feed).toContain('[skipped: pinned]');
-      expect(boundText('completeSummary')).toBe('1 deleted · 1 skipped · 1 failed');
-      expect(document.querySelector('.confetti')).toBeNull();
+      expect(feed).toContain('deleted');
+      expect(feed).toContain('failed · Missing Access');
+      expect(feed).toContain('skipped · pinned');
+      expect(boundText('completeTitle')).toBe('1 could not be deleted');
+      expect(receiptValue('Deleted')).toBe('1');
+      expect(receiptValue('Skipped')).toBe('1');
+      expect(receiptValue('Failed')).toBe('1');
     });
 
     it('reports a run the user stopped', async () => {
       FakeEngine.stopReason = 'stopped';
       await gotoReview();
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
-      expect(boundText('completeTitle')).toBe('Stopped by you');
+      await confirmDelete();
+      expect(boundText('completeTitle')).toBe('Stopped after 1');
     });
 
     it('offers a choice instead of hiding while a run is active', async () => {
       const releaseRun = holdRuns();
 
       await gotoReview();
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
       expect(ui.isRunning()).toBe(true);
 
       clickAction('close');
@@ -871,8 +905,7 @@ describe('DetcordUI', () => {
       const releaseRun = holdRuns();
 
       await gotoReview();
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
 
       clickAction('close');
       clickAction('keepRunning');
@@ -886,8 +919,7 @@ describe('DetcordUI', () => {
       const releaseRun = holdRuns();
 
       await gotoReview();
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
 
       clickAction('pause');
       expect(document.querySelector('[data-action="pause"]')?.textContent).toBe('Resume');
@@ -927,22 +959,21 @@ describe('DetcordUI', () => {
     it('runs once per channel with one config per channel', async () => {
       await gotoReview();
       const previewOptions = previewEngines().map((engine) => engine.options);
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
 
       const runs = startedEngines();
       expect(runs).toHaveLength(2);
       expect(runs.map((engine) => engine.options?.channelId)).toEqual([CHANNEL, CHANNEL_B]);
       expect(runs.map((engine) => engine.options)).toEqual(previewOptions);
-      expect(boundText('completeSummary')).toContain('2 deleted');
+      expect(receiptValue('Deleted')).toBe('2');
+      expect(receiptValue('Channels')).toBe('2 of 2');
     });
 
     it('shows which channel is being processed', async () => {
       const releaseRun = holdRuns();
 
       await gotoReview();
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
       expect(boundText('channelProgress')).toBe('Channel 1 of 2');
 
       await releaseRun();
@@ -1041,8 +1072,7 @@ describe('DetcordUI', () => {
 
       // The refused session must not be carried into the next run either.
       await gotoReview();
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
       expect(startedEngines()[0]?.resumedFrom).toBeNull();
     });
 
@@ -1072,7 +1102,7 @@ describe('DetcordUI', () => {
       const runs = startedEngines();
       expect(runs.map((engine) => engine.options?.channelId)).toEqual([CHANNEL_B, CHANNEL_C]);
       // Five from the channel that finished before the stop, one each for B and C.
-      expect(boundText('completeSummary')).toContain('7 deleted');
+      expect(receiptValue('Deleted')).toBe('7');
       expect(loadRunPlan('author-1')).toBeNull();
     });
 
@@ -1255,8 +1285,7 @@ describe('DetcordUI', () => {
       ui.show();
       await flush();
       await gotoReview();
-      clickAction('confirmDelete');
-      await flush(COUNTDOWN_MS);
+      await confirmDelete();
 
       clickAction('minimize');
       const indicator = document.querySelector('.detcord-mini-indicator');
