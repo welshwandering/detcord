@@ -27,6 +27,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ### Changed
 
+- Refreshed the interface with warm-neutral OKLCH tokens for Discord's light and dark themes, with text contrast of at least 4.5:1.
+- Replaced the destructive countdown with a 1.5-second hold-to-confirm control and a reduced-motion two-step alternative.
+- Reworked review and completion as receipt-style summaries with aligned scope, timing, and outcome rows.
+- Consolidated the running screen into one instrument with a large count, thin progress bar, outcome figures, and time-aligned log.
+- Rewrote step titles, controls, status lines, errors, and completion titles to be calm, factual, and specific, without jokes.
 - Represented every Discord API failure as a typed error with status, retry delay, global scope, and Discord error code where available.
 - Smoothed throttling by adding 50% of the observed gap after a 429 and reducing the delay by 10% after five clean deletions.
 - Honoured exhausted rate-limit buckets before the next request and waited for temporary 202 indexing responses.
@@ -55,6 +60,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ### Removed
 
+- Removed the `3-2-1-BOOM` countdown animation and completion confetti.
 - Hid oldest-first deletion pending a safer cursor redesign.
 - Removed Husky; Conventional Commit messages are checked in CI.
 

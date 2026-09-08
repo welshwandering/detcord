@@ -12,7 +12,24 @@ This roadmap records shipped behaviour and the next planned user-facing work. It
 | Adaptive throttling | Shipped | Discord retry timing, proactive bucket exhaustion, and gradual recovery are honoured. |
 | Typed API errors | Shipped | Authentication, indexing, forbidden, missing, network, and server failures have distinct outcomes. |
 | Interruptible Stop | Shipped | Stop cancels active waits and saves progress. |
-| Safe confirmation | Shipped | Preview must complete before deletion can begin. |
+| Safe confirmation | Shipped | Preview must complete before deletion can begin; the commit action uses hold-to-confirm or a reduced-motion two-step alternative. |
+
+## Design system
+
+- [PRODUCT.md](../PRODUCT.md) records the audience, purpose, context, constraints, voice, and evidence behind product decisions.
+- [DESIGN.md](../DESIGN.md) records the visual system, interaction rules, accessibility requirements, and component contract.
+- UI work follows the pbakaus/impeccable practice under Apache 2.0: run `critique`, `audit`, and `polish` before changes ship.
+
+## Motion budget
+
+| Motion | Budget | Status |
+| --- | --- | --- |
+| Hold-to-confirm fill | 1.5 seconds | Required; the single authored motion moment. |
+| Step transitions | Exponential ease-out, no more than 240ms | Permitted; use View Transitions where supported. |
+| Other state changes | Exponential ease-out, no more than 240ms | Permitted only when motion clarifies the change. |
+| Reduced motion | No hold fill or decorative transition | Required; use a plain two-step confirmation. |
+| Message shatter | None | Not planned. |
+| Button ripple | None | Not planned. |
 
 ## Hidden pending redesign
 
@@ -30,6 +47,10 @@ Run the complete target, search, and filter path without issuing delete requests
 
 Export matched messages before deletion in a documented JSON format, with an optional plain-text form. Attachment URLs may be included, but Detcord will not download or re-host attachments.
 
+### Accessibility review
+
+Complete keyboard, screen-reader, focus, contrast, live-region, and reduced-motion testing in both themes across supported browsers.
+
 Dry run and export are the next planned differentiators. Both need clear memory limits for large histories and explicit handling of private message content.
 
 ## Later candidates
@@ -41,7 +62,6 @@ Dry run and export are the next planned differentiators. Both need clear memory 
 | Saved filter presets | Reuse named filter combinations without storing credentials. |
 | Large-run confirmation | Require stronger confirmation for unusually large deletion scopes. |
 | Completion notification | Notify the user when a long visible-tab run finishes. |
-| Accessibility review | Complete screen-reader and contrast testing across supported browsers. |
 
 ## Non-goals
 

@@ -17,6 +17,8 @@ Detcord is a browser userscript for finding and permanently deleting your own Di
 
 ## Install
 
+Detcord follows your Discord light or dark theme.
+
 Detcord needs a userscript manager:
 
 - [Tampermonkey](https://www.tampermonkey.net/)
@@ -40,16 +42,20 @@ Install Tampermonkey or Violentmonkey, then install [detcord.user.js](https://gi
 
 ## Usage
 
-1. **Choose a target**: the current channel or DM, the whole server, or selected channels in **Specific** mode.
-2. **Set filters**: choose a time range, text or regex match, link or attachment requirements, and whether pinned messages are included.
-3. **Review the scan**: check the matched count, sample messages, target, and estimated duration. Deletion cannot be confirmed before this preview completes.
-4. **Begin the sweep**: keep the Discord browser tab open while Detcord processes the results.
+1. **Target**: choose the current channel or DM, the whole server, or selected channels in **Specific** mode.
+2. **Range**: choose the exact period to search.
+3. **Filters**: set text or regex matching, link or attachment requirements, and whether pinned messages are included.
+4. **Review**: read the receipt showing the matched count, newest and oldest messages, skipped messages, and estimated duration. Deletion cannot be confirmed before this preview completes.
+
+The commit button names the irreversible action and its scope, such as **Delete 12 messages**. Press and hold it for 1.5 seconds while it fills; releasing it, pressing Escape, or closing Detcord cancels the confirmation. With reduced motion enabled, Detcord uses a plain two-step confirmation instead. There is no countdown.
+
+During deletion, one running view shows the large completed count, a thin progress bar, three outcome figures, and a time-aligned event log. Keep the Discord browser tab open while it works.
 
 Use **Pause** to suspend an active run and **Stop** to end it. Stop interrupts current waits, saves progress, and leaves the run available for recovery.
 
 Detcord saves progress every 10 deletions and when you press Stop. Saved sessions expire after 24 hours. When Detcord opens and finds a matching session for the signed-in account, it offers to resume with the saved filters, target, cursor, and counters.
 
-The completion screen states how the run ended and separates deleted messages from messages already gone, skipped messages such as archived-thread posts, and failures. It also reports the run duration.
+Completion returns to the receipt and states the outcome in its title, such as **12 deleted**, **Stopped after 7**, or **3 could not be deleted**. It separates deleted messages from messages already gone, skipped messages such as archived-thread posts, and failures, and reports the run duration.
 
 ## Filters
 

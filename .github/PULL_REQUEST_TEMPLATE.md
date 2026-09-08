@@ -21,6 +21,8 @@ npx vitest run --coverage
 npm run build:userscript
 ```
 
+- [ ] UI changes follow DESIGN.md (tokens, both themes, contrast, reduced motion).
+
 ## Related issues
 
 <!-- Use Fixes #123 or Closes #123 when this pull request fully resolves an issue. -->

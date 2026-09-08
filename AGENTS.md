@@ -77,6 +77,8 @@ detcord/
 │   └── detcord.user.js
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
+├── DESIGN.md
+├── PRODUCT.md
 ├── SECURITY.md
 └── package.json
 ```
@@ -154,7 +156,11 @@ Token extraction is webpack-first. It must not dispatch synthetic browser events
 
 ### UI modules
 
-The UI owns the target, filter, review, countdown, progress, resume, completion, and error screens. It translates user selections into one immutable run configuration, then passes that configuration to preview and deletion.
+The UI owns the target, filter, review, confirmation, progress, resume, completion, and error screens. It translates user selections into one immutable run configuration, then passes that configuration to preview and deletion.
+
+- The design system lives in [DESIGN.md](DESIGN.md).
+- Design tokens are scoped to the Detcord container, never `:root`.
+- Do not add colour literals to `src/ui/window-styles.ts` outside the token block.
 
 Important invariants:
 
@@ -162,7 +168,7 @@ Important invariants:
 - Confirmation remains disabled until preview succeeds.
 - Specific mode preserves every selected channel.
 - A second click cannot start a second run.
-- Closing the window cancels the countdown.
+- Closing the window cancels confirmation.
 - Stop interrupts engine waits and persists the resumable state.
 - Failed and skipped outcomes are never rendered as successful deletions.
 - Oldest-first controls remain hidden until that mode is redesigned.
