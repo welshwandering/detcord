@@ -52,13 +52,22 @@ detcord/
 │   │   ├── storage.ts
 │   │   └── token.ts
 │   ├── ui/
+│   │   ├── channel-picker.ts
+│   │   ├── constants.ts
 │   │   ├── controller.ts
-│   │   ├── wizard.ts
+│   │   ├── effects.ts
+│   │   ├── identity.ts
+│   │   ├── ports.ts
+│   │   ├── progress-view.ts
+│   │   ├── resume.ts
+│   │   ├── review-view.ts
 │   │   ├── run-config.ts
 │   │   ├── runner.ts
-│   │   ├── progress-view.ts
-│   │   ├── channel-picker.ts
-│   │   └── window-markup.ts
+│   │   ├── templates.ts
+│   │   ├── window-chrome.ts
+│   │   ├── window-markup.ts
+│   │   ├── window-styles.ts
+│   │   └── wizard.ts
 │   ├── utils/
 │   │   ├── helpers.ts
 │   │   ├── performance.ts
@@ -74,7 +83,7 @@ detcord/
 
 Tests are co-located with their source files.
 
-The `src/ui/` controller is being split into the target modules shown above: `controller.ts`, `wizard.ts`, `run-config.ts`, `runner.ts`, `progress-view.ts`, `channel-picker.ts`, and `window-markup.ts`. Parallel work may temporarily use different names; the orchestrator will reconcile names at merge.
+The UI is split by responsibility: `controller.ts` (mount, event delegation, wizard navigation, the confirmation gate), `wizard.ts` (form state and the state/DOM reset pair), `run-config.ts` (the immutable `RunConfig` that preview and deletion share), `runner.ts` (the single owned engine and sequential multi-channel runs), `progress-view.ts` and `review-view.ts` (rendering), `channel-picker.ts`, `identity.ts` (token binding through `/users/@me`), `resume.ts`, `window-chrome.ts` (dragging and the minimised indicator), `window-markup.ts` and `window-styles.ts` (static template and CSS), `ports.ts` (UI-side interfaces onto the core, used for test injection), `constants.ts`, `effects.ts` and `templates.ts`.
 
 ---
 
