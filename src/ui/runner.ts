@@ -21,6 +21,7 @@ import type {
   SavedProgress,
   StopResult,
 } from './ports';
+import { createRunId } from './ports';
 import { engineOptionsFor, type RunConfig } from './run-config';
 import { clearRunPlan, runPlanFor, saveRunPlan } from './run-plan';
 
@@ -47,6 +48,14 @@ export interface RunProgress {
   state: DeletionEngineState;
   stats: DeletionEngineStats;
   totals: RunTotals;
+  /**
+   * Messages the review step counted across every channel of this run.
+   *
+   * The engine state only knows the channel in flight, so this is the only
+   * figure a multi-channel run can measure its aggregate counters against.
+   * Null for a checkpoint resume, which never had a review step.
+   */
+  expectedTotal: number | null;
 }
 
 /** How a run ended. */
@@ -83,6 +92,21 @@ export interface RunnerOptions {
   createApiClient: ApiClientFactory;
   createEngine: EngineFactory;
   callbacks?: RunnerCallbacks;
+}
+
+/** Everything a run needs beyond its token and config. */
+export interface RunStartOptions {
+  /** Checkpoint to continue from, applied to the first channel only. */
+  resumeFrom?: SavedProgress | undefined;
+  /** Counters carried over from earlier legs of a resumed run. */
+  baseTotals?: RunTotals | undefined;
+  /** Aggregate the review step counted, or null when there was none. */
+  expectedTotal?: number | null | undefined;
+  /**
+   * Identifier to reuse, so a resumed run keeps the checkpoint's run ID and
+   * stays paired with its own plan. A fresh run mints one.
+   */
+  runId?: string | undefined;
 }
 
 const EMPTY_TOTALS: RunTotals = { deleted: 0, failed: 0, skipped: 0, alreadyGone: 0 };
@@ -124,6 +148,8 @@ export class DeletionRunner {
   private channelsCompleted = 0;
   private legReason: DeletionStopReason | null = null;
   private planConfig: RunConfig | null = null;
+  private runId = '';
+  private expectedTotal: number | null = null;
   private startedAt = 0;
   private pageHideHandler: (() => void) | null = null;
 
@@ -211,21 +237,17 @@ export class DeletionRunner {
   /**
    * Runs the deletion, one channel at a time.
    *
-   * A run plan is persisted for the whole channel list, so a Stop part-way
-   * through a multi-channel run can be resumed into the channels that never
-   * ran rather than the interrupted one alone.
+   * Every channel of the run shares one run ID, which is written into both the
+   * engine's checkpoints and the run plan. A plan is persisted for the whole
+   * channel list, so an interruption part-way through a multi-channel run can
+   * be resumed into the channels that never ran rather than the interrupted
+   * one alone - and only ever by the checkpoint of this very run.
    *
    * @param token - Discord auth token
    * @param config - The immutable config produced at the review step
-   * @param resumeFrom - Optional saved session to continue from
-   * @param baseTotals - Counters carried over from earlier legs of a resumed run
+   * @param options - Checkpoint, banked counters, expected total and run ID
    */
-  async start(
-    token: string,
-    config: RunConfig,
-    resumeFrom?: SavedProgress,
-    baseTotals?: RunTotals,
-  ): Promise<void> {
+  async start(token: string, config: RunConfig, options: RunStartOptions = {}): Promise<void> {
     if (this.active) {
       return;
     }
@@ -234,11 +256,13 @@ export class DeletionRunner {
     this.paused = false;
     this.stopRequested = false;
     this.lastError = null;
-    this.baseTotals = baseTotals ? { ...baseTotals } : EMPTY_TOTALS;
+    this.baseTotals = options.baseTotals ? { ...options.baseTotals } : EMPTY_TOTALS;
     this.liveTotals = EMPTY_TOTALS;
     this.channelsCompleted = 0;
     this.startedAt = Date.now();
     this.planConfig = config;
+    this.runId = options.runId ?? createRunId();
+    this.expectedTotal = options.expectedTotal ?? null;
     this.installPageHideHandler();
 
     const client = this.createApiClient(token);
@@ -259,7 +283,7 @@ export class DeletionRunner {
           token,
           config,
           channelId,
-          index === 0 ? resumeFrom : undefined,
+          index === 0 ? options.resumeFrom : undefined,
         );
 
         if (this.lastError) {
@@ -285,7 +309,14 @@ export class DeletionRunner {
     if (!config) {
       return;
     }
-    saveRunPlan(runPlanFor(config, index, this.baseTotals));
+    saveRunPlan(
+      runPlanFor(config, {
+        runId: this.runId,
+        index,
+        completedTotals: this.baseTotals,
+        expectedTotal: this.expectedTotal,
+      }),
+    );
   }
 
   private async runChannel(
@@ -300,7 +331,7 @@ export class DeletionRunner {
     this.liveTotals = EMPTY_TOTALS;
     this.legReason = null;
 
-    engine.configure(engineOptionsFor(config, channelId, token));
+    engine.configure(engineOptionsFor(config, channelId, token, this.runId));
     engine.setCallbacks({
       onProgress: (state, stats, message, outcome) =>
         this.handleProgress(state, stats, message, outcome),
@@ -342,6 +373,7 @@ export class DeletionRunner {
         state,
         stats,
         totals: addTotals(this.baseTotals, this.liveTotals),
+        expectedTotal: this.expectedTotal,
       },
       message,
       outcome ?? { status: 'deleted' },
@@ -369,9 +401,13 @@ export class DeletionRunner {
         ? 'stopped'
         : 'completed';
 
-    // A stopped run keeps its plan so the remaining channels can be resumed.
-    if (reason !== 'stopped' && this.planConfig) {
-      clearRunPlan(this.planConfig.authorId);
+    // Only a run that swept every channel has nothing left to resume. A
+    // stopped run keeps its plan, and so does one an error ended: the engine
+    // leaves a checkpoint behind in both cases, and without the plan that
+    // checkpoint would resume the interrupted channel alone, losing the
+    // channels still queued and the counters banked from earlier ones.
+    if (reason === 'completed' && this.planConfig) {
+      clearRunPlan(this.planConfig.authorId, this.runId);
     }
 
     this.active = false;

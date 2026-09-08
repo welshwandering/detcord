@@ -33,7 +33,13 @@ import { ProgressView } from './progress-view';
 import { describeSavedSession, resumePlanFor, savedSessionTarget } from './resume';
 import { ReviewView } from './review-view';
 import { buildRunConfig, type RunConfig, runConfigSignature, type TargetScope } from './run-config';
-import { clearRunPlan, loadRunPlan, type RunPlanTotals } from './run-plan';
+import {
+  clearRunPlan,
+  loadRunPlan,
+  pruneRunPlans,
+  type RunPlan,
+  type RunPlanTotals,
+} from './run-plan';
 import { RUN_STYLES } from './run-styles';
 import { DeletionRunner, type RunProgress, type RunSummary } from './runner';
 import { createMiniIndicator, type DraggingHandle, enableWindowDragging } from './window-chrome';
@@ -42,6 +48,7 @@ import { WINDOW_STYLES } from './window-styles';
 import {
   applyWizardState,
   createWizardState,
+  isRelativeTimeRange,
   readWizardInputs,
   resetWizardState,
   resolveTimeRange,
@@ -131,12 +138,15 @@ export class DetcordUI {
 
   private reviewConfig: RunConfig | null = null;
   private previewSignature: string | null = null;
+  private previewTotal: number | null = null;
   private scanning = false;
   private hold: HoldToConfirmHandle | null = null;
   private routeWatchId: ReturnType<typeof setInterval> | null = null;
   private pendingResume: SavedProgress | null = null;
+  private pendingPlan: RunPlan | null = null;
   private resumeWith: SavedProgress | null = null;
   private resumeTotals: RunPlanTotals | null = null;
+  private resumeExpectedTotal: number | null = null;
   private identityGeneration = 0;
   private lastProgress: RunProgress | null = null;
 
@@ -273,9 +283,10 @@ export class DetcordUI {
     this.updateTargetCards();
 
     // Identity is re-checked on every open: the SPA can switch accounts, and a
-    // first failure has to be retryable. A hand-pasted token is kept, because
-    // it cannot be read back off the page.
-    if (!this.runner.isActive() && !this.manualIdentity) {
+    // first failure has to be retryable. A hand-pasted token is no exception -
+    // the account behind it can be switched away from just as easily - so the
+    // page is asked again and the pasted token only kept when it cannot answer.
+    if (!this.runner.isActive()) {
       void this.establishIdentity();
     } else if (this.identityChecked && this.authorId) {
       this.offerResume(this.authorId);
@@ -456,12 +467,38 @@ export class DetcordUI {
       return;
     }
     if (!identity.ok) {
+      if (this.keepManualIdentity()) {
+        return;
+      }
       // The flag stays unset so the next open, or "Try again", retries.
       this.identityChecked = false;
       this.showError(identity.error);
       return;
     }
+    if (this.manualIdentity && identity.authorId === this.authorId) {
+      // Same account: the token that was pasted is still the right one, and
+      // replacing it would throw away a resume the user may be about to take.
+      this.offerResume(identity.authorId);
+      return;
+    }
     this.acceptIdentity(identity.token, identity.authorId, identity.client, false);
+  }
+
+  /**
+   * Keeps a confirmed manual identity when the page cannot be read.
+   *
+   * An unreadable page is the very reason a token was pasted, so it is not
+   * evidence that the account changed.
+   *
+   * @returns True when the manual identity was kept and nothing else is due
+   */
+  private keepManualIdentity(): boolean {
+    const authorId = this.authorId;
+    if (!this.manualIdentity || !authorId) {
+      return false;
+    }
+    this.offerResume(authorId);
+    return true;
   }
 
   /**
@@ -490,8 +527,10 @@ export class DetcordUI {
       this.invalidateReview();
       this.reviewView?.clearErrors();
       this.pendingResume = null;
+      this.pendingPlan = null;
       this.resumeWith = null;
       this.resumeTotals = null;
+      this.resumeExpectedTotal = null;
       this.setVisibility('resumePrompt', false);
     }
     // A confirmed identity clears whatever failure put the error screen up.
@@ -611,6 +650,9 @@ export class DetcordUI {
       return;
     }
     this.wizardState.timeRange = range;
+    // A relative preset means what it said when it was picked, so the instant
+    // it was measured from is pinned here rather than read again at review.
+    this.wizardState.rangeSelectedAt = isRelativeTimeRange(range) ? Date.now() : null;
     this.invalidateReview();
     if (this.windowEl) {
       applyWizardState(this.wizardState, this.windowEl, this.summaryContext());
@@ -657,6 +699,7 @@ export class DetcordUI {
     this.invalidateReview();
     this.resumeWith = null;
     this.resumeTotals = null;
+    this.resumeExpectedTotal = null;
     this.lastProgress = null;
     this.reviewView?.clearErrors();
     if (this.windowEl) {
@@ -680,6 +723,7 @@ export class DetcordUI {
     this.cancelHold();
     this.reviewConfig = null;
     this.previewSignature = null;
+    this.previewTotal = null;
     this.reviewView?.setConfirmEnabled(false);
   }
 
@@ -784,6 +828,7 @@ export class DetcordUI {
       }
       review.renderPreview(summary);
       this.previewSignature = runConfigSignature(config);
+      this.previewTotal = summary.totalCount;
       review.setConfirmEnabled(summary.totalCount > 0);
       if (summary.totalCount === 0) {
         this.showStepError('reviewError', 'Nothing matches those filters.', 'review');
@@ -794,6 +839,7 @@ export class DetcordUI {
       }
       review.showScanFailed();
       this.previewSignature = null;
+      this.previewTotal = null;
       review.setConfirmEnabled(false);
       this.showStepError('reviewError', errorMessage(error, 'Scan failed.'), 'review');
     } finally {
@@ -862,6 +908,7 @@ export class DetcordUI {
       this.invalidateReview();
       this.resumeWith = null;
       this.resumeTotals = null;
+      this.resumeExpectedTotal = null;
       this.showScreen('setup');
       this.showStepError('locationError', ACCOUNT_CHANGED_MESSAGE, 'location');
       return;
@@ -871,11 +918,19 @@ export class DetcordUI {
     this.progressView.reset();
     this.showScreen('running');
 
-    const resumeFrom = this.resumeWith ?? undefined;
-    const baseTotals = this.resumeTotals ?? undefined;
+    const resumeFrom = this.resumeWith;
+    // A resumed run keeps the checkpoint's identity, so every channel it goes
+    // on to sweep still writes and reads that run's plan.
+    const options = {
+      resumeFrom: resumeFrom ?? undefined,
+      baseTotals: this.resumeTotals ?? undefined,
+      expectedTotal: resumeFrom ? this.resumeExpectedTotal : this.previewTotal,
+      runId: resumeFrom?.runId,
+    };
     this.resumeWith = null;
     this.resumeTotals = null;
-    void this.runner.start(this.token, config, resumeFrom, baseTotals);
+    this.resumeExpectedTotal = null;
+    void this.runner.start(this.token, config, options);
   }
 
   private handlePause(): void {
@@ -910,6 +965,9 @@ export class DetcordUI {
   /**
    * Offers to continue an interrupted deletion for this account.
    *
+   * The plan is looked up by the checkpoint's own run ID, so what the prompt
+   * describes is exactly what accepting it would sweep.
+   *
    * @param authorId - Confirmed Discord user ID
    */
   private offerResume(authorId: string): void {
@@ -923,11 +981,14 @@ export class DetcordUI {
       saved = null;
     }
     this.pendingResume = saved;
+    this.pendingPlan = null;
+    pruneRunPlans(authorId);
     if (!saved) {
       this.setVisibility('resumePrompt', false);
       return;
     }
-    this.setBoundText('resumeText', describeSavedSession(saved));
+    this.pendingPlan = loadRunPlan(authorId, saved.runId);
+    this.setBoundText('resumeText', describeSavedSession(saved, this.pendingPlan));
     this.setVisibility('resumePrompt', true);
   }
 
@@ -941,7 +1002,7 @@ export class DetcordUI {
       saved,
       getChannelIdFromUrl(),
       window.location.pathname,
-      loadRunPlan(authorId),
+      this.pendingPlan,
     );
     if (!resume) {
       this.showStepError('locationError', 'That saved session has no usable target.', 'location');
@@ -949,8 +1010,10 @@ export class DetcordUI {
     }
     this.setVisibility('resumePrompt', false);
     this.pendingResume = null;
+    this.pendingPlan = null;
     this.resumeWith = saved;
     this.resumeTotals = resume.baseTotals;
+    this.resumeExpectedTotal = resume.expectedTotal;
     this.reviewConfig = resume.config;
     this.beginRun(resume.config);
   }
@@ -958,10 +1021,11 @@ export class DetcordUI {
   private handleDiscardSession(): void {
     const saved = this.pendingResume;
     this.pendingResume = null;
+    this.pendingPlan = null;
     this.setVisibility('resumePrompt', false);
     if (saved) {
-      clearProgress(saved.authorId, targetKeyFor(savedSessionTarget(saved)));
-      clearRunPlan(saved.authorId);
+      clearProgress(saved.authorId, targetKeyFor(savedSessionTarget(saved)), saved.runId);
+      clearRunPlan(saved.authorId, saved.runId);
     }
   }
 

@@ -16,7 +16,7 @@ import type {
   PreviewResult,
   SavedProgress,
 } from './ports';
-import { loadRunPlan, saveRunPlan } from './run-plan';
+import { loadRunPlan, type RunPlan, saveRunPlan } from './run-plan';
 
 vi.mock('../core/token', () => ({
   getToken: vi.fn(),
@@ -51,6 +51,8 @@ class FakeEngine implements EnginePort {
   static previewError: Error | null = null;
   static script: Array<[DiscordMessage, MessageOutcome]> = [[message('m1'), { status: 'deleted' }]];
   static stopReason: 'completed' | 'stopped' | 'error' = 'completed';
+  /** When set, the run in that channel fails instead of deleting. */
+  static errorOnChannel: string | null = null;
   /** When set, every run holds here until the promise resolves. */
   static gate: Promise<void> | null = null;
 
@@ -112,6 +114,13 @@ class FakeEngine implements EnginePort {
     this.state.running = true;
     if (FakeEngine.gate) {
       await FakeEngine.gate;
+    }
+    if (FakeEngine.errorOnChannel && FakeEngine.errorOnChannel === this.options?.channelId) {
+      const error = new Error('Discord stopped answering');
+      this.state.running = false;
+      this.callbacks.onError?.(error);
+      this.callbacks.onStop?.(this.state, this.stats, { reason: 'error' });
+      throw error;
     }
     for (const [msg, outcome] of FakeEngine.script) {
       if (outcome.status === 'deleted') this.state.deletedCount++;
@@ -252,6 +261,23 @@ async function gotoReview(): Promise<void> {
   await flush();
 }
 
+/** A checkpoint any account could be offered, for switch tests. */
+const savedForResume: SavedProgress = {
+  version: 2,
+  runId: 'run-1',
+  authorId: 'account-b',
+  channelId: CHANNEL,
+  deletionOrder: 'newest',
+  cursor: { maxId: '900000000000000000' },
+  deletedCount: 3,
+  failedCount: 0,
+  skippedCount: 0,
+  alreadyGoneCount: 0,
+  totalFound: 8,
+  initialTotalFound: 8,
+  timestamp: Date.parse('2024-05-01T10:00:00Z'),
+};
+
 describe('DetcordUI', () => {
   let ui: DetcordUI;
 
@@ -267,6 +293,7 @@ describe('DetcordUI', () => {
     FakeEngine.previewFiltersApplied = false;
     FakeEngine.previewError = null;
     FakeEngine.stopReason = 'completed';
+    FakeEngine.errorOnChannel = null;
     FakeEngine.gate = null;
     FakeEngine.script = [[message('m1'), { status: 'deleted' }]];
     currentUser = { id: 'author-1', username: 'me', globalName: null };
@@ -416,6 +443,94 @@ describe('DetcordUI', () => {
       await gotoReview();
       expect(previewEngines()[0]?.options?.authorId).toBe('pasted-account');
       expect(previewEngines()[0]?.options?.authToken).toBe('!!!starts-with-punctuation');
+    });
+
+    /** Pastes a token for another account and has Discord confirm it. */
+    async function pasteTokenFor(account: string, token: string): Promise<void> {
+      currentUser = { id: account, username: account, globalName: null };
+      (document.querySelector('[data-input="manualToken"]') as HTMLInputElement).value = token;
+      clickAction('useManualToken');
+      await flush();
+    }
+
+    it('drops a pasted token once the page belongs to another account', async () => {
+      vi.mocked(getToken).mockReturnValue(null);
+      ui = mountUI();
+      ui.show();
+      await flush();
+      await pasteTokenFor('account-b', 'token-b');
+      expect(ui.getCurrentScreen()).toBe('setup');
+      ui.hide();
+
+      // Discord has been switched to another account, and its token now reads.
+      vi.mocked(getToken).mockReturnValue('token-c');
+      currentUser = { id: 'account-c', username: 'c', globalName: null };
+      ui.show();
+      await flush();
+
+      await gotoReview();
+      expect(previewEngines()[0]?.options?.authorId).toBe('account-c');
+      expect(previewEngines()[0]?.options?.authToken).toBe('token-c');
+    });
+
+    it('discards what the previous account had reviewed on that switch', async () => {
+      vi.mocked(getToken).mockReturnValue(null);
+      // Persistence only ever hands back the asked-for account's own entries.
+      ui = mountUI({
+        findResumableSession: (authorId) => (authorId === 'account-b' ? savedForResume : null),
+      });
+      ui.show();
+      await flush();
+      await pasteTokenFor('account-b', 'token-b');
+      expect(
+        document.querySelector('[data-bind="resumePrompt"]')?.classList.contains('visible'),
+      ).toBe(true);
+      ui.hide();
+
+      vi.mocked(getToken).mockReturnValue('token-c');
+      currentUser = { id: 'account-c', username: 'c', globalName: null };
+      ui.show();
+      await flush();
+
+      // The prompt belonged to account B; account C must not inherit it.
+      expect(
+        document.querySelector('[data-bind="resumePrompt"]')?.classList.contains('visible'),
+      ).toBe(false);
+    });
+
+    it('keeps a pasted token while the page still cannot be read', async () => {
+      vi.mocked(getToken).mockReturnValue(null);
+      ui = mountUI();
+      ui.show();
+      await flush();
+      await pasteTokenFor('account-b', 'token-b');
+      ui.hide();
+
+      // The page is as unreadable as it was when the token was pasted.
+      ui.show();
+      await flush();
+      expect(ui.getCurrentScreen()).toBe('setup');
+
+      await gotoReview();
+      expect(previewEngines()[0]?.options?.authorId).toBe('account-b');
+      expect(previewEngines()[0]?.options?.authToken).toBe('token-b');
+    });
+
+    it('keeps a pasted token when the page names the same account', async () => {
+      vi.mocked(getToken).mockReturnValue(null);
+      ui = mountUI();
+      ui.show();
+      await flush();
+      await pasteTokenFor('account-b', 'token-b');
+      ui.hide();
+
+      vi.mocked(getToken).mockReturnValue('page-token');
+      ui.show();
+      await flush();
+
+      await gotoReview();
+      expect(previewEngines()[0]?.options?.authorId).toBe('account-b');
+      expect(previewEngines()[0]?.options?.authToken).toBe('token-b');
     });
 
     it('rejects a manual token Discord refuses', async () => {
@@ -610,7 +725,12 @@ describe('DetcordUI', () => {
 
       const run = startedEngines()[0];
       expect(run).toBeDefined();
-      expect(run?.options).toEqual(preview?.options);
+      // The run adds its own identity; everything that decides which messages
+      // are touched is the same object the preview counted.
+      const { runId, ...runOptions } = run?.options ?? {};
+      expect(runOptions).toEqual(preview?.options);
+      expect(runId).toBeTruthy();
+      expect(preview?.options?.runId).toBeUndefined();
     });
 
     it('shows the target and resolved range on the review screen', async () => {
@@ -742,6 +862,24 @@ describe('DetcordUI', () => {
       const elapsed = Date.now() - snowflakeToDate(options?.maxId as string).getTime();
       expect(elapsed).toBeGreaterThanOrEqual(30 * 24 * 60 * 60 * 1000);
       expect(elapsed).toBeLessThan(30 * 24 * 60 * 60 * 1000 + 1000);
+    });
+
+    it('measures a preset from when it was picked, not from the review step', async () => {
+      ui = mountUI();
+      ui.show();
+      await flush();
+      clickAction('nextStep');
+      click('[data-timerange="older-30d"]');
+      const pickedAt = Date.now();
+
+      // Ten minutes spent on the remaining steps must not widen the range.
+      await flush(10 * 60 * 1000);
+      clickAction('nextStep');
+      clickAction('nextStep');
+      await flush();
+
+      const maxId = previewEngines()[0]?.options?.maxId as string;
+      expect(snowflakeToDate(maxId).getTime()).toBe(pickedAt - 30 * 24 * 60 * 60 * 1000);
     });
   });
 
@@ -964,7 +1102,16 @@ describe('DetcordUI', () => {
       const runs = startedEngines();
       expect(runs).toHaveLength(2);
       expect(runs.map((engine) => engine.options?.channelId)).toEqual([CHANNEL, CHANNEL_B]);
-      expect(runs.map((engine) => engine.options)).toEqual(previewOptions);
+      expect(
+        runs.map((engine) => {
+          const { runId: _runId, ...rest } = engine.options ?? {};
+          return rest;
+        }),
+      ).toEqual(previewOptions);
+      // One run, one identity: both channels write to the same plan.
+      const runIds = runs.map((engine) => engine.options?.runId);
+      expect(new Set(runIds).size).toBe(1);
+      expect(runIds[0]).toBeTruthy();
       expect(receiptValue('Deleted')).toBe('2');
       expect(receiptValue('Channels')).toBe('2 of 2');
     });
@@ -977,6 +1124,34 @@ describe('DetcordUI', () => {
       expect(boundText('channelProgress')).toBe('Channel 1 of 2');
 
       await releaseRun();
+    });
+
+    it('counts the run against the total the review step showed', async () => {
+      await gotoReview();
+      // Two channels of four messages each, as the receipt said.
+      expect(boundText('reviewCount')).toBe('8');
+      await confirmDelete();
+
+      // One deletion per channel, measured against the whole run rather than
+      // the four messages of whichever channel happened to be in flight.
+      expect(boundText('progressCount')).toBe('2 of 8');
+    });
+
+    it('keeps the plan and the banked counters when a channel fails', async () => {
+      FakeEngine.errorOnChannel = CHANNEL_B;
+      await gotoReview();
+      await confirmDelete();
+
+      expect(boundText('completeTitle')).toBe('Stopped by an error');
+      const runId = startedEngines()[0]?.options?.runId as string;
+      expect(runId).toBeTruthy();
+
+      const plan = loadRunPlan('author-1', runId) as RunPlan;
+      expect(plan).not.toBeNull();
+      expect(plan.channelIds).toEqual([CHANNEL, CHANNEL_B]);
+      // The first channel finished, so its work is banked for the resume.
+      expect(plan.completedTotals.deleted).toBe(1);
+      expect(plan.expectedTotal).toBe(8);
     });
   });
 
@@ -1078,7 +1253,8 @@ describe('DetcordUI', () => {
 
     it('continues into the channels a stopped multi-channel run never reached', async () => {
       saveRunPlan({
-        version: 1,
+        version: 2,
+        runId: 'run-1',
         authorId: 'author-1',
         scope: 'specific',
         channelIds: [CHANNEL, CHANNEL_B, CHANNEL_C],
@@ -1090,7 +1266,7 @@ describe('DetcordUI', () => {
         deletionOrder: 'newest',
         timeRangeLabel: 'Everything',
         completedTotals: { deleted: 5, failed: 0, skipped: 0, alreadyGone: 0 },
-        savedAt: Date.parse('2024-05-01T10:04:00Z'),
+        savedAt: Date.now(),
       });
 
       ui = mountUI({ findResumableSession: () => ({ ...saved, channelId: CHANNEL_B }) });
@@ -1103,13 +1279,14 @@ describe('DetcordUI', () => {
       expect(runs.map((engine) => engine.options?.channelId)).toEqual([CHANNEL_B, CHANNEL_C]);
       // Five from the channel that finished before the stop, one each for B and C.
       expect(receiptValue('Deleted')).toBe('7');
-      expect(loadRunPlan('author-1')).toBeNull();
+      expect(loadRunPlan('author-1', 'run-1')).toBeNull();
     });
 
     it('reuses the upper bound the interrupted run was given', async () => {
       const captured = new Date('2024-05-01T10:00:00Z');
       saveRunPlan({
-        version: 1,
+        version: 2,
+        runId: 'run-1',
         authorId: 'author-1',
         scope: 'specific',
         channelIds: [CHANNEL_B, CHANNEL_C],
@@ -1121,7 +1298,7 @@ describe('DetcordUI', () => {
         deletionOrder: 'newest',
         timeRangeLabel: 'Everything',
         completedTotals: { deleted: 0, failed: 0, skipped: 0, alreadyGone: 0 },
-        savedAt: captured.getTime(),
+        savedAt: Date.now(),
       });
 
       ui = mountUI({ findResumableSession: () => ({ ...saved, channelId: CHANNEL_B }) });
@@ -1134,9 +1311,135 @@ describe('DetcordUI', () => {
       expect(snowflakeToDate(maxId)).toEqual(captured);
     });
 
+    /** A plan as the runner would have written it for one run. */
+    function planFor(runId: string, channelIds: string[], index: number, deleted = 0): void {
+      saveRunPlan({
+        version: 2,
+        runId,
+        authorId: 'author-1',
+        scope: 'specific',
+        channelIds,
+        index,
+        newestAllowed: Date.now(),
+        hasLink: false,
+        hasFile: false,
+        includePinned: false,
+        deletionOrder: 'newest',
+        timeRangeLabel: 'Everything',
+        completedTotals: { deleted, failed: 0, skipped: 0, alreadyGone: 0 },
+        expectedTotal: 20,
+        savedAt: Date.now(),
+      });
+    }
+
+    it('names the channels a resume would go on to sweep', async () => {
+      planFor('run-1', [CHANNEL, CHANNEL_B, CHANNEL_C], 1, 5);
+      ui = mountUI({ findResumableSession: () => ({ ...saved, channelId: CHANNEL_B }) });
+      ui.show();
+      await flush();
+
+      const text = boundText('resumeText');
+      expect(text).toContain(`12 of 40 done in channel ${CHANNEL_B}`);
+      expect(text).toContain('then 1 more channel.');
+    });
+
+    it('promises only the interrupted channel when no plan covers the session', async () => {
+      planFor('another-run', [CHANNEL, CHANNEL_B, CHANNEL_C], 1, 5);
+      ui = mountUI({ findResumableSession: () => ({ ...saved, channelId: CHANNEL_B }) });
+      ui.show();
+      await flush();
+      expect(boundText('resumeText')).not.toContain('more channel');
+
+      clickAction('resumeSession');
+      await flush();
+
+      // A plan from a different run must not widen the resume beyond the
+      // channel the checkpoint itself names.
+      expect(startedEngines().map((engine) => engine.options?.channelId)).toEqual([CHANNEL_B]);
+    });
+
+    it('never resumes one run into the channels of another run', async () => {
+      // Two runs for the same account: the first was stopped in its second
+      // channel, the second is a later run over a different channel.
+      planFor('run-1', [CHANNEL, CHANNEL_B], 1, 5);
+      planFor('run-2', [CHANNEL_C], 0, 0);
+
+      ui = mountUI({ findResumableSession: () => ({ ...saved, channelId: CHANNEL_B }) });
+      ui.show();
+      await flush();
+      clickAction('resumeSession');
+      await flush();
+
+      const swept = startedEngines().map((engine) => engine.options?.channelId);
+      expect(swept).toEqual([CHANNEL_B]);
+      expect(swept).not.toContain(CHANNEL_C);
+      // Five banked by the first run plus the one this leg deleted.
+      expect(receiptValue('Deleted')).toBe('6');
+      // The other run's plan is still there for its own checkpoint.
+      expect(loadRunPlan('author-1', 'run-2')).not.toBeNull();
+    });
+
+    it('ignores a plan that stops at a different channel of the same run', async () => {
+      // The checkpoint's channel is in the list, but the plan says the run had
+      // reached the first channel, so the two describe different moments.
+      planFor('run-1', [CHANNEL, CHANNEL_B, CHANNEL_C], 0, 5);
+      ui = mountUI({ findResumableSession: () => ({ ...saved, channelId: CHANNEL_C }) });
+      ui.show();
+      await flush();
+      clickAction('resumeSession');
+      await flush();
+
+      expect(startedEngines().map((engine) => engine.options?.channelId)).toEqual([CHANNEL_C]);
+      expect(receiptValue('Deleted')).toBe('1');
+    });
+
+    it('resumes a run an error interrupted into its remaining channels', async () => {
+      let resumable: SavedProgress | null = null;
+      guildChannels = [
+        { id: CHANNEL, name: 'general' },
+        { id: CHANNEL_B, name: 'random' },
+        { id: CHANNEL_C, name: 'links' },
+      ];
+      ui = mountUI({ findResumableSession: () => resumable });
+      ui.show();
+      await flush();
+      click('[data-target="specific"]');
+      await flush();
+      click(`[data-channel-id="${CHANNEL}"]`);
+      click(`[data-channel-id="${CHANNEL_B}"]`);
+      click(`[data-channel-id="${CHANNEL_C}"]`);
+
+      FakeEngine.errorOnChannel = CHANNEL_B;
+      await gotoReview();
+      await confirmDelete();
+      expect(boundText('completeTitle')).toBe('Stopped by an error');
+
+      // The engine leaves a checkpoint for the channel that failed.
+      const runId = startedEngines()[0]?.options?.runId as string;
+      resumable = { ...saved, runId, channelId: CHANNEL_B, deletedCount: 0 };
+      FakeEngine.errorOnChannel = null;
+      FakeEngine.instances = [];
+
+      clickAction('reset');
+      ui.hide();
+      ui.show();
+      await flush();
+      clickAction('resumeSession');
+      await flush();
+
+      expect(startedEngines().map((engine) => engine.options?.channelId)).toEqual([
+        CHANNEL_B,
+        CHANNEL_C,
+      ]);
+      // One banked from the channel that finished before the error, one each
+      // for the two channels the resumed run swept.
+      expect(receiptValue('Deleted')).toBe('3');
+    });
+
     it('drops a run plan along with the session it was discarded with', async () => {
       saveRunPlan({
-        version: 1,
+        version: 2,
+        runId: 'run-1',
         authorId: 'author-1',
         scope: 'specific',
         channelIds: [CHANNEL, CHANNEL_B],
@@ -1156,7 +1459,7 @@ describe('DetcordUI', () => {
       await flush();
       clickAction('discardSession');
       await flush();
-      expect(loadRunPlan('author-1')).toBeNull();
+      expect(loadRunPlan('author-1', 'run-1')).toBeNull();
     });
   });
 

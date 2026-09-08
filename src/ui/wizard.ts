@@ -79,11 +79,29 @@ const RELATIVE_PRESETS: Partial<Record<TimeRangeId, { after?: number; before?: n
   'older-90d': { before: 90 * DAY_MS },
 };
 
+/**
+ * Whether a preset resolves against an instant rather than entered dates.
+ *
+ * @param id - The preset the user picked
+ * @returns True when the preset is measured back from a moment in time
+ */
+export function isRelativeTimeRange(id: TimeRangeId): boolean {
+  return RELATIVE_PRESETS[id] !== undefined;
+}
+
 /** Mutable state behind the wizard screens. */
 export interface WizardState {
   stepIndex: number;
   target: TargetScope;
   timeRange: TimeRangeId;
+  /**
+   * Epoch milliseconds the relative preset was picked at, or null.
+   *
+   * "Older than 30 days" names a boundary the user saw when they chose it, so
+   * it is pinned there. Resolving it at review instead would widen the range
+   * by however long they spent on the remaining steps.
+   */
+  rangeSelectedAt: number | null;
   /** Raw text of the custom "from" date input (`YYYY-MM-DD`). */
   customAfter: string;
   /** Raw text of the custom "to" date input (`YYYY-MM-DD`). */
@@ -113,6 +131,7 @@ export function createWizardState(): WizardState {
     stepIndex: 0,
     target: 'channel',
     timeRange: 'all',
+    rangeSelectedAt: null,
     customAfter: '',
     customBefore: '',
     content: '',
@@ -152,9 +171,10 @@ function resolveCustomRange(afterText: string, beforeText: string): TimeRangeRes
 /**
  * Resolves the selected time range to concrete instants.
  *
- * Presets are computed from `now` at the moment the run is configured, never
- * round-tripped through a `<input type="date">`, so "Last 24 hours" covers
- * exactly 24 hours.
+ * A relative preset is measured back from the moment it was selected, which
+ * `rangeSelectedAt` records; `now` is only the fallback for state that has no
+ * such instant. Nothing is round-tripped through an `<input type="date">`, so
+ * "Last 24 hours" covers exactly 24 hours.
  *
  * @param state - Current wizard state
  * @param now - Reference instant, normally `new Date()`
@@ -169,10 +189,11 @@ export function resolveTimeRange(state: WizardState, now: Date): TimeRangeResult
   if (!offsets) {
     return { ok: true, after: null, before: null };
   }
+  const from = state.rangeSelectedAt ?? now.getTime();
   return {
     ok: true,
-    after: offsets.after === undefined ? null : new Date(now.getTime() - offsets.after),
-    before: offsets.before === undefined ? null : new Date(now.getTime() - offsets.before),
+    after: offsets.after === undefined ? null : new Date(from - offsets.after),
+    before: offsets.before === undefined ? null : new Date(from - offsets.before),
   };
 }
 
@@ -471,6 +492,7 @@ export function resetWizardState(
   state.stepIndex = fresh.stepIndex;
   state.target = fresh.target;
   state.timeRange = fresh.timeRange;
+  state.rangeSelectedAt = fresh.rangeSelectedAt;
   state.customAfter = fresh.customAfter;
   state.customBefore = fresh.customBefore;
   state.content = fresh.content;

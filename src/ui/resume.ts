@@ -8,6 +8,10 @@
  * checkpoint alone would drop every channel queued behind the interrupted one,
  * so the run plan written by the runner is consulted first: it names the whole
  * channel list, the filters in force and the counters already banked.
+ *
+ * A plan is only ever paired with the checkpoint of its own run. Anything less
+ * would let a checkpoint adopt the channels, filters and banked counters of a
+ * different run, and sweep a channel the user never reviewed for it.
  */
 
 import { snowflakeToDate } from '../utils/helpers';
@@ -21,18 +25,54 @@ export interface ResumePlan {
   readonly config: RunConfig;
   /** Counters from the channels that finished before the interruption. */
   readonly baseTotals: RunPlanTotals | null;
+  /** Messages the interrupted run's review step counted, when it is known. */
+  readonly expectedTotal: number | null;
+}
+
+/**
+ * Whether a plan describes the very run a checkpoint belongs to.
+ *
+ * The run ID, the account and the channel the plan says the run had reached
+ * must all agree. A plan that merely mentions the channel somewhere in its
+ * list belongs to some other run and is not usable here.
+ *
+ * @param plan - The persisted run plan
+ * @param saved - The saved session
+ * @returns True when the plan may be used to resume this session
+ */
+export function runPlanApplies(plan: RunPlan, saved: SavedProgress): boolean {
+  return (
+    plan.runId === saved.runId &&
+    plan.authorId === saved.authorId &&
+    saved.channelId !== undefined &&
+    plan.channelIds[plan.index] === saved.channelId
+  );
+}
+
+/** Names the target a saved session was working on. */
+function describeTarget(saved: SavedProgress): string {
+  return saved.guildId ? `server ${saved.guildId}` : `channel ${saved.channelId ?? '?'}`;
 }
 
 /**
  * Wording for the resume prompt.
  *
+ * The sentence must name the scope resuming would actually sweep, so a user
+ * can never accept a resume that covers more channels than it says.
+ *
  * @param saved - The saved session
- * @returns A sentence naming the time, progress and target
+ * @param plan - The persisted run plan for this author, when there is one
+ * @returns A sentence naming the time, progress and scope
  */
-export function describeSavedSession(saved: SavedProgress): string {
+export function describeSavedSession(saved: SavedProgress, plan?: RunPlan | null): string {
   const when = new Date(saved.timestamp).toLocaleString();
-  const target = saved.guildId ? `server ${saved.guildId}` : `channel ${saved.channelId ?? '?'}`;
-  return `Resume deletion from ${when}? ${saved.deletedCount} of ${saved.totalFound} done, target ${target}.`;
+  const progress = `${saved.deletedCount} of ${saved.totalFound} done in ${describeTarget(saved)}`;
+  const queued = plan && runPlanApplies(plan, saved) ? plan.channelIds.length - plan.index - 1 : 0;
+  if (queued <= 0) {
+    return `Resume the deletion from ${when}? ${progress}.`;
+  }
+  const channels = queued === 1 ? '1 more channel' : `${queued} more channels`;
+  return `Resume the deletion from ${when}? ${progress}, then ${channels}.`;
 }
 
 /**
@@ -45,15 +85,10 @@ export function describeSavedSession(saved: SavedProgress): string {
  *   or null when the plan does not cover this session
  */
 function configFromPlan(plan: RunPlan, saved: SavedProgress, routePath: string): RunConfig | null {
-  const channelId = saved.channelId;
-  if (plan.authorId !== saved.authorId || channelId === undefined) {
+  if (!runPlanApplies(plan, saved)) {
     return null;
   }
-  const start = plan.channelIds.indexOf(channelId);
-  if (start === -1) {
-    return null;
-  }
-  const channels = plan.channelIds.slice(start);
+  const channels = plan.channelIds.slice(plan.index);
   const built = buildRunConfig({
     authorId: plan.authorId,
     scope: plan.scope,
@@ -142,11 +177,15 @@ export function resumePlanFor(
   if (plan) {
     const planned = configFromPlan(plan, saved, routePath);
     if (planned) {
-      return { config: planned, baseTotals: plan.completedTotals };
+      return {
+        config: planned,
+        baseTotals: plan.completedTotals,
+        expectedTotal: plan.expectedTotal ?? null,
+      };
     }
   }
   const config = configForSavedSession(saved, fallbackChannelId, routePath);
-  return config ? { config, baseTotals: null } : null;
+  return config ? { config, baseTotals: null, expectedTotal: null } : null;
 }
 
 /**

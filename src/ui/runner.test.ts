@@ -13,8 +13,8 @@ import type {
   SavedProgress,
 } from './ports';
 import { buildRunConfig, type RunConfig } from './run-config';
-import { loadRunPlan, type RunPlan, saveRunPlan } from './run-plan';
-import { DeletionRunner, type RunSummary } from './runner';
+import { loadRunPlan, type RunPlan } from './run-plan';
+import { DeletionRunner, type RunProgress, type RunSummary } from './runner';
 
 const CHANNEL_A = '111111111111111111';
 const CHANNEL_B = '222222222222222222';
@@ -409,10 +409,55 @@ describe('DeletionRunner.start', () => {
       timestamp: Date.now(),
     };
     const runner = makeRunner();
-    await runner.start('token', configFor([CHANNEL_A, CHANNEL_B]), saved);
+    await runner.start('token', configFor([CHANNEL_A, CHANNEL_B]), { resumeFrom: saved });
     const started = FakeEngine.instances.filter((e) => e.startCount > 0);
     expect(started[0]?.resumedFrom).toBe(saved);
     expect(started[1]?.resumedFrom).toBeNull();
+  });
+
+  it('gives every channel of one run the same run ID', async () => {
+    const runner = makeRunner();
+    await runner.start('token', configFor([CHANNEL_A, CHANNEL_B, CHANNEL_C]));
+    const ids = FakeEngine.instances
+      .filter((e) => e.startCount > 0)
+      .map((e) => e.options?.runId ?? '');
+    expect(ids[0]).toBeTruthy();
+    expect(new Set(ids).size).toBe(1);
+  });
+
+  it('mints a different run ID for each fresh run', async () => {
+    const runner = makeRunner();
+    await runner.start('token', configFor([CHANNEL_A]));
+    const first = FakeEngine.instances[0]?.options?.runId;
+    FakeEngine.instances = [];
+    await runner.start('token', configFor([CHANNEL_A]));
+    expect(FakeEngine.instances[0]?.options?.runId).not.toBe(first);
+  });
+
+  it('reuses the run ID a resumed run was given', async () => {
+    const runner = makeRunner();
+    await runner.start('token', configFor([CHANNEL_A, CHANNEL_B]), { runId: 'resumed-run' });
+    const started = FakeEngine.instances.filter((e) => e.startCount > 0);
+    expect(started.map((e) => e.options?.runId)).toEqual(['resumed-run', 'resumed-run']);
+    expect(loadRunPlan('author-1', 'resumed-run')).toBeNull();
+  });
+
+  it('reports the expected total on every progress tick', async () => {
+    const seen: Array<number | null> = [];
+    const runner = makeRunner({
+      onProgress: (progress: RunProgress) => seen.push(progress.expectedTotal),
+    });
+    await runner.start('token', configFor([CHANNEL_A, CHANNEL_B]), { expectedTotal: 14 });
+    expect(seen).toEqual([14, 14]);
+  });
+
+  it('reports no expected total when the run was never previewed', async () => {
+    const seen: Array<number | null> = [];
+    const runner = makeRunner({
+      onProgress: (progress: RunProgress) => seen.push(progress.expectedTotal),
+    });
+    await runner.start('token', configFor([CHANNEL_A]));
+    expect(seen).toEqual([null]);
   });
 
   it('pauses and resumes the live engine', async () => {
@@ -466,11 +511,16 @@ describe('DeletionRunner.start', () => {
 });
 
 describe('DeletionRunner run plans', () => {
+  /** The run ID every engine of the last run was configured with. */
+  function runIdOf(engines: FakeEngine[] = FakeEngine.instances): string {
+    return engines.find((engine) => engine.options?.runId)?.options?.runId ?? '';
+  }
+
   /**
    * Runs three channels and stops during the second, which is what a user
    * closing the tab mid-run leaves behind.
    */
-  async function stopInSecondChannel(): Promise<{ summary: RunSummary | null }> {
+  async function stopInSecondChannel(): Promise<{ summary: RunSummary | null; runId: string }> {
     let summary: RunSummary | null = null;
     let created = 0;
     let release = (): void => {};
@@ -495,32 +545,42 @@ describe('DeletionRunner run plans', () => {
       },
     });
 
-    const running = runner.start('token', configFor([CHANNEL_A, CHANNEL_B, CHANNEL_C]));
+    const running = runner.start('token', configFor([CHANNEL_A, CHANNEL_B, CHANNEL_C]), {
+      expectedTotal: 30,
+    });
     await settle();
     expect(FakeEngine.instances).toHaveLength(2);
 
     runner.stop();
     release();
     await running;
-    return { summary };
+    return { summary, runId: runIdOf() };
   }
 
   it('keeps a plan naming every channel a stopped run never reached', async () => {
-    const { summary } = await stopInSecondChannel();
+    const { summary, runId } = await stopInSecondChannel();
     expect((summary as unknown as RunSummary).reason).toBe('stopped');
 
-    const plan = loadRunPlan('author-1') as RunPlan;
+    const plan = loadRunPlan('author-1', runId) as RunPlan;
     expect(plan).not.toBeNull();
+    expect(plan.runId).toBe(runId);
     expect(plan.channelIds).toEqual([CHANNEL_A, CHANNEL_B, CHANNEL_C]);
     expect(plan.index).toBe(1);
     // Only the first channel finished, so only its work is banked.
     expect(plan.completedTotals).toEqual({ deleted: 1, failed: 0, skipped: 0, alreadyGone: 0 });
     expect(plan.scope).toBe('specific');
+    // The aggregate the review step showed outlives the interruption.
+    expect(plan.expectedTotal).toBe(30);
+  });
+
+  it('files the plan under the author and the run', async () => {
+    const { runId } = await stopInSecondChannel();
+    expect(window.localStorage.getItem(`detcord_runplan:v2:author-1:${runId}`)).not.toBeNull();
   });
 
   it('carries the banked counters of earlier channels into a resumed run', async () => {
-    await stopInSecondChannel();
-    const plan = loadRunPlan('author-1') as RunPlan;
+    const { runId } = await stopInSecondChannel();
+    const plan = loadRunPlan('author-1', runId) as RunPlan;
 
     FakeEngine.instances = [];
     let summary: RunSummary | null = null;
@@ -529,7 +589,10 @@ describe('DeletionRunner run plans', () => {
         summary = result;
       },
     });
-    await runner.start('token', configFor([CHANNEL_B, CHANNEL_C]), undefined, plan.completedTotals);
+    await runner.start('token', configFor([CHANNEL_B, CHANNEL_C]), {
+      baseTotals: plan.completedTotals,
+      runId,
+    });
 
     // One from the interrupted channel plus one each for B and C.
     expect((summary as unknown as RunSummary).deleted).toBe(3);
@@ -539,10 +602,10 @@ describe('DeletionRunner run plans', () => {
   it('removes the plan when the whole run completes', async () => {
     const runner = makeRunner();
     await runner.start('token', configFor([CHANNEL_A, CHANNEL_B]));
-    expect(loadRunPlan('author-1')).toBeNull();
+    expect(loadRunPlan('author-1', runIdOf())).toBeNull();
   });
 
-  it('removes the plan when the run ends in an error', async () => {
+  it('keeps the plan when the run ends in an error, as the checkpoint survives', async () => {
     const runner = new DeletionRunner({
       createApiClient: () => fakeClient(),
       createEngine: () => {
@@ -551,37 +614,50 @@ describe('DeletionRunner run plans', () => {
         return engine;
       },
     });
-    await runner.start('token', configFor([CHANNEL_A, CHANNEL_B]));
-    expect(loadRunPlan('author-1')).toBeNull();
+    await runner.start('token', configFor([CHANNEL_A, CHANNEL_B, CHANNEL_C]), {
+      expectedTotal: 12,
+    });
+
+    const plan = loadRunPlan('author-1', runIdOf()) as RunPlan;
+    expect(plan).not.toBeNull();
+    // The channels queued behind the failure are still there to resume into.
+    expect(plan.channelIds).toEqual([CHANNEL_A, CHANNEL_B, CHANNEL_C]);
+    expect(plan.index).toBe(0);
+    expect(plan.expectedTotal).toBe(12);
   });
 
-  it('overwrites a stale plan when a new run starts', async () => {
-    saveRunPlan({
-      version: 1,
-      authorId: 'author-1',
-      scope: 'specific',
-      channelIds: [CHANNEL_C],
-      index: 0,
-      newestAllowed: Date.now(),
-      hasLink: false,
-      hasFile: false,
-      includePinned: false,
-      deletionOrder: 'newest',
-      timeRangeLabel: 'Everything',
-      completedTotals: { deleted: 99, failed: 0, skipped: 0, alreadyGone: 0 },
-      savedAt: Date.now(),
-    });
+  it('leaves the plan of an earlier run alone when a second run starts', async () => {
+    const { runId: first } = await stopInSecondChannel();
+    FakeEngine.instances = [];
 
     const runner = makeRunner();
     const release = holdNextEngine();
-    const running = runner.start('token', configFor([CHANNEL_A, CHANNEL_B]));
+    const running = runner.start('token', configFor([CHANNEL_C]));
     await Promise.resolve();
 
-    const plan = loadRunPlan('author-1') as RunPlan;
-    expect(plan.channelIds).toEqual([CHANNEL_A, CHANNEL_B]);
-    expect(plan.completedTotals.deleted).toBe(0);
+    const second = runIdOf();
+    expect(second).not.toBe(first);
+    expect(loadRunPlan('author-1', second)?.channelIds).toEqual([CHANNEL_C]);
+    // The stopped run can still be resumed into the channels it never reached.
+    const earlier = loadRunPlan('author-1', first) as RunPlan;
+    expect(earlier.channelIds).toEqual([CHANNEL_A, CHANNEL_B, CHANNEL_C]);
+    expect(earlier.index).toBe(1);
+    expect(earlier.completedTotals.deleted).toBe(1);
 
     release();
     await running;
+    // Completing the second run clears only its own plan.
+    expect(loadRunPlan('author-1', second)).toBeNull();
+    expect(loadRunPlan('author-1', first)).not.toBeNull();
+  });
+
+  it('discards a v1 plan for the author rather than reading it', async () => {
+    window.localStorage.setItem(
+      'detcord_runplan:v1:author-1',
+      JSON.stringify({ version: 1, authorId: 'author-1', channelIds: [CHANNEL_C] }),
+    );
+    const runner = makeRunner();
+    await runner.start('token', configFor([CHANNEL_A]));
+    expect(window.localStorage.getItem('detcord_runplan:v1:author-1')).toBeNull();
   });
 });

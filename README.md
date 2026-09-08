@@ -53,7 +53,7 @@ During deletion, one running view shows the large completed count, a thin progre
 
 Use **Pause** to suspend an active run and **Stop** to end it. Stop interrupts current waits, saves progress, and leaves the run available for recovery.
 
-Detcord saves progress every 10 deletions and when you press Stop. Saved sessions expire after 24 hours. When Detcord opens and finds a matching session for the signed-in account, it offers to resume with the saved filters, target, cursor, and counters.
+Detcord saves progress every 10 deletions and when you press Stop. Saved sessions expire after 24 hours. When Detcord opens and finds a matching session for the signed-in account, it offers to resume with the saved filters, target, cursor, and counters. A resume covers only the run that saved it: where that run was sweeping several channels, it continues into the channels it never reached, and the prompt names how many of them are still queued before you accept.
 
 Completion returns to the receipt and states the outcome in its title, such as **12 deleted**, **Stopped after 7**, or **3 could not be deleted**. It separates deleted messages from messages already gone, skipped messages such as archived-thread posts, and failures, and reports the run duration.
 

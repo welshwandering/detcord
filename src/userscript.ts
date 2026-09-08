@@ -1,11 +1,12 @@
 /**
  * Userscript entry point.
  *
- * This file is the entry for the `detcord.user.js` build. It has no exports:
- * the library entry (`./index`) re-exports the core, and a library-mode IIFE
+ * This file is the entry for the `detcord.user.js` build, and it exports one
+ * function on purpose: `bootstrap`, which the entry test calls. The library
+ * entry (`./index`) re-exports the core, and a library-mode IIFE built from it
  * would place those re-exports, including the token extractors, on a page
- * global that any script on discord.com could call. Building from a
- * side-effect-only entry keeps the userscript's global surface empty.
+ * global that any script on discord.com could call. Building from here keeps
+ * the `Detcord` global down to that single deliberate function.
  */
 
 import { init } from './index';

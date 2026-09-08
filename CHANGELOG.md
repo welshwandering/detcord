@@ -24,6 +24,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 - Stopped oldest-first discovery from swallowing API errors; the mode is hidden while it is redesigned.
 - Made Stop interrupt search, delete, indexing, backoff, and oldest-first discovery waits promptly.
 - Treated unauthorised responses as fatal, forbidden archived-thread responses as skipped, and missing messages as already gone.
+- Tied each saved run plan to the run that wrote it, so two runs for one account can no longer adopt each other's channels, filters, or banked counters.
+- Kept the saved run plan when a run ends in an error, so resuming continues into the queued channels with the counters already banked.
+- Measured multi-channel progress against the total shown at review instead of the current channel's own total.
+- Dropped a manually entered token when Discord has since switched to a different account.
+- Captured relative date presets at the moment they are selected rather than at the review step.
 
 ### Changed
 

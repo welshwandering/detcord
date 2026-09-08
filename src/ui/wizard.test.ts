@@ -5,6 +5,7 @@ import {
   createWizardState,
   describeWizardSummary,
   isFilterOn,
+  isRelativeTimeRange,
   readWizardInputs,
   resetWizardState,
   resolveTimeRange,
@@ -51,11 +52,41 @@ describe('resolveTimeRange', () => {
   it('sets only the upper bound for the "older than" presets', () => {
     const state = createWizardState();
     state.timeRange = 'older-30d';
+    state.rangeSelectedAt = now.getTime();
     const result = resolveTimeRange(state, now);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.after).toBeNull();
     expect(now.getTime() - (result.before as Date).getTime()).toBe(30 * DAY);
+  });
+
+  it('measures a relative preset from when it was selected, not from review', () => {
+    const selectedAt = new Date('2024-03-15T09:00:00.000Z');
+    const atReview = new Date('2024-03-15T09:30:00.000Z');
+    const state = createWizardState();
+    state.timeRange = 'older-30d';
+    state.rangeSelectedAt = selectedAt.getTime();
+
+    const result = resolveTimeRange(state, atReview);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Half an hour spent on the remaining steps must not widen the range.
+    expect((result.before as Date).getTime()).toBe(selectedAt.getTime() - 30 * DAY);
+  });
+
+  it('falls back to now for a relative preset with no captured instant', () => {
+    const state = createWizardState();
+    state.timeRange = '24h';
+    expect(state.rangeSelectedAt).toBeNull();
+    const result = resolveTimeRange(state, now);
+    expect(result.ok && now.getTime() - (result.after as Date).getTime()).toBe(24 * HOUR);
+  });
+
+  it('names the presets that are measured from an instant', () => {
+    expect(isRelativeTimeRange('24h')).toBe(true);
+    expect(isRelativeTimeRange('older-90d')).toBe(true);
+    expect(isRelativeTimeRange('all')).toBe(false);
+    expect(isRelativeTimeRange('custom')).toBe(false);
   });
 
   it('parses custom dates as local start and end of day', () => {
@@ -185,6 +216,7 @@ describe('wizard DOM binding', () => {
     }
     state.target = 'specific';
     state.timeRange = '24h';
+    state.rangeSelectedAt = Date.parse('2024-03-15T09:00:00.000Z');
     state.stepIndex = 3;
     state.selectedChannels.add('111111111111111111');
     (root.querySelector('[data-input="contentFilter"]') as HTMLInputElement).value = 'stale';
@@ -198,6 +230,7 @@ describe('wizard DOM binding', () => {
       stepIndex: 0,
       target: 'channel',
       timeRange: 'all',
+      rangeSelectedAt: null,
       hasLink: false,
       hasFile: false,
       includePinned: false,

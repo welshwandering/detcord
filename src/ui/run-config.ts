@@ -385,12 +385,16 @@ export function describeRunConfig(
  * @param config - The immutable run config
  * @param channelId - The channel this leg of the run targets
  * @param authToken - Discord auth token
+ * @param runId - Identifier every channel of one run shares, so the engine's
+ *   checkpoint can be paired with that run's plan. Omitted for a preview,
+ *   which persists nothing.
  * @returns Options ready for `engine.configure()`
  */
 export function engineOptionsFor(
   config: RunConfig,
   channelId: string,
   authToken: string,
+  runId?: string,
 ): DeletionEngineOptions {
   const options: DeletionEngineOptions = {
     authToken,
@@ -402,6 +406,9 @@ export function engineOptionsFor(
     hasFile: config.hasFile,
   };
 
+  if (runId) {
+    options.runId = runId;
+  }
   if (config.scope === 'server' && config.guildId) {
     options.guildId = config.guildId;
   }

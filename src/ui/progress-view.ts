@@ -129,6 +129,26 @@ export function rateLimitStatus(delayMs: number): string {
   return `Waiting ${Math.max(1, Math.round(delayMs / 1000))} s for Discord's rate limit`;
 }
 
+/**
+ * The denominator the count and the bar are measured against.
+ *
+ * The counters are run-wide but the engine state only describes the channel in
+ * flight, so a multi-channel run must be measured against the aggregate the
+ * review step counted. Where there is no such figure the single channel's own
+ * total is used, never below what has already been processed: a count reading
+ * above its own total says nothing a user can act on.
+ *
+ * @param progress - The progress tick being rendered
+ * @param processed - Messages accounted for so far, across the whole run
+ * @returns A denominator of at least one
+ */
+function runTotal(progress: RunProgress, processed: number): number {
+  const { expectedTotal, state } = progress;
+  const channelTotal = state.initialTotalFound || state.totalFound || 0;
+  const expected = expectedTotal !== null && expectedTotal > 0 ? expectedTotal : channelTotal;
+  return Math.max(expected, processed, 1);
+}
+
 /** Renders deletion progress into the running and completion screens. */
 export class ProgressView {
   private root: ParentNode | null = null;
@@ -343,9 +363,9 @@ export class ProgressView {
     if (!els) {
       return;
     }
-    const { state, stats, totals } = progress;
+    const { stats, totals } = progress;
     const processed = totals.deleted + totals.failed + totals.skipped + totals.alreadyGone;
-    const total = Math.max(state.initialTotalFound || state.totalFound || processed, 1);
+    const total = runTotal(progress, processed);
     this.percent = Math.min(100, Math.round((processed / total) * 100));
 
     this.setText(els.count, `${processed} of ${total}`);

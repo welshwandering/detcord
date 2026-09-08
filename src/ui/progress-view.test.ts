@@ -36,6 +36,7 @@ function progress(overrides: Partial<RunProgress> = {}): RunProgress {
     state: state(),
     stats: stats(),
     totals: { deleted: 0, failed: 0, skipped: 0, alreadyGone: 0 },
+    expectedTotal: null,
     ...overrides,
   };
 }
@@ -173,6 +174,60 @@ describe('ProgressView', () => {
     expect((root.querySelector('[data-bind="progressBar"]') as HTMLElement).style.width).toBe(
       '58%',
     );
+  });
+
+  it('measures a multi-channel run against the total the review step counted', () => {
+    // Channel two of two: the run-wide counters have already passed this
+    // channel's own total, which is not a denominator any run ever had.
+    view.push(
+      progress({
+        position: { index: 2, count: 2, channelId: '222222222222222222' },
+        state: state({ initialTotalFound: 4, totalFound: 4 }),
+        totals: { deleted: 4, failed: 1, skipped: 0, alreadyGone: 0 },
+        expectedTotal: 14,
+      }),
+      'm1',
+      'hello',
+      { status: 'deleted' },
+    );
+    expect(text('progressCount')).toBe('5 of 14');
+    expect((root.querySelector('[data-bind="progressBar"]') as HTMLElement).style.width).toBe(
+      '36%',
+    );
+  });
+
+  it('never shows a count above its own total when no expected total is known', () => {
+    view.push(
+      progress({
+        position: { index: 2, count: 2, channelId: '222222222222222222' },
+        state: state({ initialTotalFound: 4, totalFound: 4 }),
+        totals: { deleted: 5, failed: 0, skipped: 0, alreadyGone: 0 },
+        expectedTotal: null,
+      }),
+      'm1',
+      'hello',
+      { status: 'deleted' },
+    );
+    expect(text('progressCount')).toBe('5 of 5');
+    expect(view.getPercent()).toBe(100);
+  });
+
+  it('keeps the minimised pill on the same figure as the bar', () => {
+    const mini = document.createElement('div');
+    mini.innerHTML = '<span data-bind="miniCount">0 / 0</span>';
+    view.setMiniIndicator(mini);
+    view.push(
+      progress({
+        position: { index: 2, count: 2, channelId: '222222222222222222' },
+        state: state({ initialTotalFound: 4, totalFound: 4 }),
+        totals: { deleted: 5, failed: 0, skipped: 0, alreadyGone: 0 },
+        expectedTotal: 14,
+      }),
+      'm1',
+      'x',
+      { status: 'deleted' },
+    );
+    expect(mini.querySelector('[data-bind="miniCount"]')?.textContent).toBe('5 / 14');
   });
 
   it('renders each figure separately rather than folding them together', () => {
