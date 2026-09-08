@@ -22,7 +22,7 @@ const SECONDARY_INK =
 export const WIZARD_STYLES = `
 /* Persistent summary line, under the step indicator. */
 .${CSS_PREFIX}-wizard-summary {
-	padding: 0 20px 12px;
+	padding: 0 0 12px;
 	font-size: 12px;
 	line-height: 1.4;
 	color: ${SECONDARY_INK};
@@ -83,4 +83,39 @@ export const WIZARD_STYLES = `
 .${CSS_PREFIX}-card[hidden] {
 	display: none;
 }
+
+/* The review step keeps its action row in view: the receipt scrolls, the button does not. */
+.${CSS_PREFIX}-wizard-step[data-wizard-step="review"] .${CSS_PREFIX}-btn-group {
+	position: sticky;
+	bottom: 0;
+	z-index: 1;
+	margin-top: var(--${CSS_PREFIX}-space-4);
+	padding-top: var(--${CSS_PREFIX}-space-3);
+	background: var(--${CSS_PREFIX}-ground);
+}
+
+/* Browsers pin a sticky box at the scroll container's content edge, so its bottom
+   padding stays a window onto the scrolling receipt; paint that strip too. */
+.${CSS_PREFIX}-wizard-step[data-wizard-step="review"] .${CSS_PREFIX}-btn-group::after {
+	content: '';
+	position: absolute;
+	top: calc(100% - 1px);
+	left: 0;
+	right: 0;
+	height: calc(var(--${CSS_PREFIX}-pad) + 1px);
+	background: var(--${CSS_PREFIX}-ground);
+	pointer-events: none;
+}
+
+.${CSS_PREFIX}-wizard-step[data-wizard-step="review"] .${CSS_PREFIX}-btn-group::before {
+	content: '';
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 100%;
+	height: 16px;
+	background: linear-gradient(to top, var(--${CSS_PREFIX}-ground), transparent);
+	pointer-events: none;
+}
+
 `;
