@@ -32,6 +32,7 @@ import type {
 import { DiscordApiClient } from '../core/discord-api';
 import type { SavedFilters, SavedProgress } from '../core/persistence';
 
+export { createRunId } from '../core/deletion-engine';
 export { clearProgress, findResumableSession, targetKeyFor } from '../core/persistence';
 export type {
   CurrentUser,

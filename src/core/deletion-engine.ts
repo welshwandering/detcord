@@ -78,6 +78,12 @@ export type DeletionOrder = 'newest' | 'oldest';
 
 /** Configuration options for the deletion engine. */
 export interface DeletionEngineOptions {
+  /**
+   * Identifier for the run. A multi-channel runner passes one id to every
+   * channel's engine so the checkpoint and the run plan can be correlated;
+   * when absent the engine mints its own.
+   */
+  runId?: string;
   /** Discord auth token. */
   authToken: string;
   /** ID of the message author (the current user). */
@@ -396,7 +402,7 @@ function failureOutcome(error: DiscordApiError): MessageOutcome {
 }
 
 /** Generates an identifier unique enough to correlate a resumed run. */
-function createRunId(): string {
+export function createRunId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
@@ -719,7 +725,7 @@ export class DeletionEngine {
     this.cursorMaxId = this.options?.maxId;
     this.stopRequested = false;
     this.abortController = new AbortController();
-    this.runId = resumed?.runId ?? createRunId();
+    this.runId = resumed?.runId ?? this.options?.runId ?? createRunId();
 
     if (resumed) {
       this.applyResumedState(resumed);
