@@ -22,7 +22,7 @@ import type {
 import { DeletionEngine } from '../core/deletion-engine';
 import { DiscordApiClient, type DiscordChannel } from '../core/discord-api';
 import { getAuthorId, getChannelIdFromUrl, getGuildIdFromUrl, getToken } from '../core/token';
-import type { DeletionOrder } from '../core/types';
+import type { DeletionOrder } from '../core/deletion-engine';
 import { dateToSnowflake, escapeHtml, formatDuration } from '../utils/helpers';
 import {
   createBoundedArray,
@@ -3289,6 +3289,7 @@ export class DetcordUI {
         deletedCount: 0,
         failedCount: 0,
         skippedCount: 0,
+        alreadyGoneCount: 0,
         totalFound: 0,
         initialTotalFound: 0,
         currentOffset: 0,

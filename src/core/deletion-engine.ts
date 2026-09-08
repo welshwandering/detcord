@@ -1,204 +1,243 @@
 /**
- * DeletionEngine - Orchestrates bulk message deletion for Detcord
+ * DeletionEngine - orchestrates bulk message deletion for Detcord.
  *
- * This module provides a stateful engine for searching and deleting Discord messages.
- * It handles rate limiting, retries, pagination, and progress tracking.
+ * The engine owns the whole run: pagination, rate-limit handling, retries,
+ * client-side filtering, progress reporting and resume support. Every failure
+ * reaching it is a {@link DiscordApiError}, so decisions are made on `code`
+ * rather than on ad-hoc status fields.
  */
 
 import { dateToSnowflake, snowflakeToDate } from '../utils/helpers';
-import { validateRegex } from '../utils/validators';
+import { safeRegexTest, validateRegex } from '../utils/validators';
 import type {
   DiscordMessage as ApiDiscordMessage,
   RateLimitInfo as ApiRateLimitInfo,
+  SearchParams as ApiSearchParams,
   SearchResponse as ApiSearchResponse,
 } from './discord-api';
+import { DiscordApiError, type DiscordApiErrorCode } from './errors';
 import {
   clearProgress,
-  hasExistingSession,
-  loadProgress,
+  findResumableSession,
   type SavedFilters,
   type SavedProgress,
   saveProgress,
   shouldSaveProgress,
+  targetKeyFor,
 } from './persistence';
 
 // =============================================================================
 // Types and Interfaces
 // =============================================================================
 
-/**
- * Discord message structure - re-export from discord-api for consistency
- */
+/** Discord message structure, re-exported so consumers have one source. */
 export type DiscordMessage = ApiDiscordMessage;
 
-/**
- * Search response from Discord API - re-export from discord-api
- */
+/** Search response from Discord, re-exported for consumers. */
 export type SearchResponse = ApiSearchResponse;
 
-/**
- * Rate limit information from API response - extended for engine use
- */
-export interface RateLimitInfo extends Pick<ApiRateLimitInfo, 'remaining' | 'resetAfter'> {
-  retryAfter?: number;
+/** Rate limit information, re-exported for consumers. */
+export type RateLimitInfo = ApiRateLimitInfo;
+
+/** Search parameters accepted by the API client. */
+export type SearchParams = ApiSearchParams;
+
+/** What happened to a single message. */
+export type MessageOutcomeStatus = 'deleted' | 'already_gone' | 'skipped' | 'failed';
+
+/** Result of processing one message. */
+export interface MessageOutcome {
+  /** Terminal status for this message. */
+  status: MessageOutcomeStatus;
+  /** Human-readable explanation, mainly for skips and failures. */
+  reason?: string;
+  /** API error code when the outcome came from a failed request. */
+  code?: DiscordApiErrorCode;
 }
 
+/** Why a run ended. */
+export type DeletionStopReason = 'completed' | 'stopped' | 'error';
+
 /**
- * API client interface - dependency injection for testability
+ * API client interface - dependency injection for testability.
+ *
+ * Deliberately narrower than the concrete `DiscordApiClient`: the engine never
+ * needs `getCurrentUser` or channel listings.
  */
 export interface DiscordApiClient {
-  searchMessages(params: {
-    guildId?: string;
-    channelId?: string;
-    authorId?: string;
-    content?: string;
-    hasLink?: boolean;
-    hasFile?: boolean;
-    minId?: string;
-    maxId?: string;
-    includePinned?: boolean;
-    includeNsfw?: boolean;
-    offset?: number;
-  }): Promise<SearchResponse>;
-
-  deleteMessage(
-    channelId: string,
-    messageId: string,
-  ): Promise<{ success: boolean; error?: string; retryAfter?: number }>;
-
+  /** Searches messages; throws a {@link DiscordApiError} on any failure. */
+  searchMessages(params: SearchParams): Promise<SearchResponse>;
+  /** Deletes one message; resolves `already_gone` for a 404. */
+  deleteMessage(channelId: string, messageId: string): Promise<'deleted' | 'already_gone'>;
+  /** Latest rate limit headers, or null when none have been seen. */
   getRateLimitInfo(): RateLimitInfo | null;
 }
 
-/**
- * Deletion order determines which messages are deleted first
- */
+/** Deletion order determines which messages are deleted first. */
 export type DeletionOrder = 'newest' | 'oldest';
 
-/**
- * Configuration options for the deletion engine
- */
+/** Configuration options for the deletion engine. */
 export interface DeletionEngineOptions {
-  /** Discord auth token */
+  /** Discord auth token. */
   authToken: string;
-  /** ID of the message author (user) */
+  /** ID of the message author (the current user). */
   authorId: string;
-  /** Guild (server) ID - optional, for server-wide search */
+  /** Guild (server) ID - set for a server-wide run. */
   guildId?: string;
-  /** Channel ID - required for channel-specific search */
+  /** Channel ID - required, also used for DMs. */
   channelId: string;
-  /** Minimum message ID (for "after" date filter) */
+  /** Minimum message ID ("after" date filter). */
   minId?: string;
-  /** Maximum message ID (for "before" date filter) */
+  /** Maximum message ID ("before" date filter). */
   maxId?: string;
-  /** Text content filter */
+  /** Text content filter. */
   content?: string;
-  /** Filter for messages containing links */
+  /** Filter for messages containing links. */
   hasLink?: boolean;
-  /** Filter for messages containing file attachments */
+  /** Filter for messages containing file attachments. */
   hasFile?: boolean;
-  /** Whether to include pinned messages (default: false) */
+  /** Whether to include pinned messages (default: false). */
   includePinned?: boolean;
-  /** Regex pattern for content matching */
+  /** Client-side regex pattern for content matching. */
   pattern?: string;
-  /** Delay between search requests in ms (default: 10000) */
+  /** Delay between search requests in ms (default: 10000). */
   searchDelay?: number;
-  /** Delay between delete requests in ms (default: 1000) */
+  /** Delay between delete requests in ms (default: 1000). */
   deleteDelay?: number;
-  /** Maximum retries for rate limit recovery (default: 3) */
+  /** Maximum retries for recoverable failures (default: 3). */
   maxRetries?: number;
-  /** Order to delete messages: 'newest' (default) or 'oldest' first */
+  /** Order to delete messages: 'newest' (default) or 'oldest' first. */
   deletionOrder?: DeletionOrder;
 }
 
-/**
- * Current state of the deletion engine
- */
+/** Current state of the deletion engine. */
 export interface DeletionEngineState {
-  /** Whether the engine is currently running */
+  /** Whether the engine is currently running. */
   running: boolean;
-  /** Whether the engine is paused */
+  /** Whether the engine is paused. */
   paused: boolean;
-  /** Number of messages successfully deleted */
+  /** Messages successfully deleted. */
   deletedCount: number;
-  /** Number of messages that failed to delete */
+  /** Messages that failed to delete. */
   failedCount: number;
-  /** Number of messages skipped (permanently undeletable - threads, permissions, etc.) */
+  /** Messages skipped by a filter, ownership guard or 403. */
   skippedCount: number;
-  /** Total number of messages found matching filters (current remaining from latest search) */
+  /** Messages that had already been deleted when we tried. */
+  alreadyGoneCount: number;
+  /** Latest `total_results` reported by search. */
   totalFound: number;
-  /** Initial total found on first search (used for progress calculation) */
+  /** `total_results` of the first search of the run. */
   initialTotalFound: number;
-  /** Current search offset for pagination */
+  /** Retained for UI compatibility; the engine paginates by cursor, not offset. */
   currentOffset: number;
-  /** Current status message for UI feedback */
+  /** Current status message for UI feedback. */
   status?: string | undefined;
 }
 
-/**
- * Statistics for the deletion operation
- */
+/** Statistics for the deletion operation. */
 export interface DeletionEngineStats {
-  /** Timestamp when deletion started */
+  /** Timestamp when deletion started. */
   startTime: number;
-  /** Number of times we were rate limited */
+  /** Number of times we were rate limited. */
   throttledCount: number;
-  /** Total time spent waiting for rate limits (ms) */
+  /** Total time spent waiting on rate limits (ms). */
   throttledTime: number;
-  /** Average response time for API calls (ms) */
+  /** Rolling average response time for API calls (ms). */
   averagePing: number;
-  /** Estimated time remaining in ms (-1 if unknown) */
+  /** Estimated time remaining in ms (-1 if unknown). */
   estimatedTimeRemaining: number;
 }
 
-/**
- * Rate limit change information for callback
- */
+/** Rate limit change information for the UI. */
 export interface RateLimitChangeInfo {
-  /** Whether the engine is currently throttled */
+  /** Whether the engine is currently throttled. */
   isThrottled: boolean;
-  /** Current delay between delete requests in ms */
+  /** Current delay between delete requests in ms. */
   currentDelay: number;
 }
 
-/**
- * Event callbacks for engine lifecycle
- */
+/** Event callbacks for engine lifecycle. */
 export interface DeletionEngineCallbacks {
-  /** Called when deletion starts */
+  /** Called when deletion starts. */
   onStart?: (state: DeletionEngineState, stats: DeletionEngineStats) => void;
-  /** Called on each successful deletion */
+  /** Called for every processed message, including skips and failures. */
   onProgress?: (
     state: DeletionEngineState,
     stats: DeletionEngineStats,
     message: DiscordMessage,
+    outcome: MessageOutcome,
   ) => void;
-  /** Called when deletion stops (complete, cancelled, or error) */
-  onStop?: (state: DeletionEngineState, stats: DeletionEngineStats) => void;
-  /** Called when an error occurs */
+  /** Called when the run ends, with the reason it ended. */
+  onStop?: (
+    state: DeletionEngineState,
+    stats: DeletionEngineStats,
+    result: { reason: DeletionStopReason },
+  ) => void;
+  /** Called when an error aborts the run. */
   onError?: (error: Error) => void;
-  /** Called when rate limit state changes */
+  /** Called when rate limit state changes. */
   onRateLimitChange?: (info: RateLimitChangeInfo) => void;
-  /** Called when status message changes (for UI feedback during long operations) */
+  /** Called when the status message changes during long operations. */
   onStatus?: (status: string | undefined) => void;
+}
+
+/** Result of {@link DeletionEngine.preview}. */
+export interface PreviewResult {
+  /** Server-reported total for the search, before client-side filtering. */
+  totalCount: number;
+  /** Up to ten messages that would be deleted. */
+  sampleMessages: DiscordMessage[];
+  /** Rough estimate of the run duration in ms. */
+  estimatedTimeMs: number;
+  /** True when client-side filters mean `totalCount` is an upper bound. */
+  filtersApplied: boolean;
+}
+
+/** A snowflake range for one search. */
+interface SearchRange {
+  minId?: string | undefined;
+  maxId?: string | undefined;
+}
+
+/** Retry counters for a single search or delete operation. */
+interface RetryBudget {
+  /** Consecutive network/server backoff attempts. */
+  backoff: number;
+  /** Consecutive 202 indexing waits. */
+  indexing: number;
+  /** Consecutive 429 waits. */
+  rateLimits: number;
+}
+
+/** State carried from a saved session into the next run. */
+interface ResumedRunState {
+  runId: string;
+  deletedCount: number;
+  failedCount: number;
+  skippedCount: number;
+  alreadyGoneCount: number;
+  totalFound: number;
+  initialTotalFound: number;
+  cursor: SavedProgress['cursor'];
 }
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-/** Default delay between search API calls in ms */
+/** Default delay between search API calls in ms. */
 const DEFAULT_SEARCH_DELAY = 10000;
 
-/** Default delay between delete API calls in ms */
+/** Default delay between delete API calls in ms. */
 const DEFAULT_DELETE_DELAY = 1000;
 
-/** Default maximum retries for rate limit recovery */
+/** Default maximum retries for recoverable failures. */
 const DEFAULT_MAX_RETRIES = 3;
 
-/** Number of messages per search page (Discord's limit) */
+/** Number of messages per search page (Discord's limit). */
 const MESSAGES_PER_PAGE = 25;
 
-/** Message types that are deletable by the user */
+/** Message types that a user is allowed to delete. */
 const DELETABLE_MESSAGE_TYPES = new Set([
   0, // DEFAULT - regular user message
   6, // CHANNEL_PINNED_MESSAGE
@@ -218,61 +257,181 @@ const DELETABLE_MESSAGE_TYPES = new Set([
   21, // THREAD_STARTER_MESSAGE
 ]);
 
-/** Number of consecutive empty pages before assuming end of results */
+/** Consecutive empty pages tolerated before assuming the range is exhausted. */
 const MAX_EMPTY_PAGE_RETRIES = 5;
 
-/** Time window size for oldest-first deletion (1 week in milliseconds) */
-const TIME_WINDOW_SIZE_MS = 7 * 24 * 60 * 60 * 1000;
-
-/** Base multiplier for exponential backoff on empty pages (delay increases by this factor each retry) */
+/** Multiplier applied to the search delay for each consecutive empty page. */
 const EMPTY_PAGE_BACKOFF_MULTIPLIER = 1.3;
 
-/** Number of consecutive successes needed before reducing delay */
+/** Time window size for oldest-first deletion (one week). */
+const TIME_WINDOW_SIZE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Maximum bisection steps when hunting for the oldest message. */
+const MAX_BISECTION_STEPS = 20;
+
+/** Earliest date a Discord message can carry. */
+const DISCORD_EPOCH_ISO = '2015-01-01T00:00:00.000Z';
+
+/** Consecutive 429s tolerated before a request is treated as failed. */
+const MAX_CONSECUTIVE_RATE_LIMITS = 10;
+
+/** Indexing (202) waits allowed, as a multiple of `maxRetries`. */
+const INDEXING_RETRY_MULTIPLIER = 3;
+
+/** First step of the exponential backoff for network and server errors. */
+const BACKOFF_BASE_MS = 1000;
+
+/** Ceiling for the exponential backoff. */
+const BACKOFF_CAP_MS = 30000;
+
+/** Fallback wait when a 429 carries no `retry_after`. */
+const DEFAULT_RETRY_AFTER_SECONDS = 1;
+
+/** Minimum jitter added to a rate limit wait. */
+const RATE_LIMIT_JITTER_MIN_MS = 50;
+
+/** Maximum jitter added to a rate limit wait. */
+const RATE_LIMIT_JITTER_MAX_MS = 250;
+
+/** Minimum wait after a global rate limit. */
+const GLOBAL_RATE_LIMIT_FLOOR_MS = 1000;
+
+/** Ceiling for a proactive wait driven by `X-RateLimit-Remaining: 0`. */
+const MAX_HEADER_WAIT_MS = 60000;
+
+/** Consecutive successes needed before the delete delay is reduced. */
 const THROTTLE_RECOVERY_THRESHOLD = 5;
 
-/** Percentage to decrease delay toward baseline after recovery threshold */
+/** Fraction of the gap to baseline recovered after each success run. */
 const THROTTLE_RECOVERY_PERCENTAGE = 0.1;
 
-/** Percentage of gap toward retry_after to increase delay */
+/** Fraction of the gap toward `retry_after` added when throttled. */
 const THROTTLE_INCREASE_PERCENTAGE = 0.5;
 
-/** Baseline delay between delete requests in ms */
+/** Baseline delay between delete requests in ms. */
 const BASELINE_DELETE_DELAY = 1000;
 
+/** Status shown while Discord builds its search index. */
+const INDEXING_STATUS = "Waiting for Discord's search index…";
+
 // =============================================================================
-// DeletionEngine Class
+// Module helpers
+// =============================================================================
+
+/**
+ * Picks the searched-for message out of a search result group.
+ *
+ * Discord returns each hit with surrounding context; only the member flagged
+ * `hit` is ours to delete. `group[0]` is a last resort for older payloads.
+ */
+function pickHit(group: DiscordMessage[]): DiscordMessage | undefined {
+  return group.find((message) => message.hit === true) ?? group[0];
+}
+
+/** Flattens a search response into one message per result group. */
+function extractHits(response: SearchResponse): DiscordMessage[] {
+  const messages: DiscordMessage[] = [];
+  for (const group of response.messages ?? []) {
+    const hit = pickHit(group);
+    if (hit) {
+      messages.push(hit);
+    }
+  }
+  return messages;
+}
+
+/** Smallest snowflake in a page, or null when the page is empty. */
+function minMessageId(messages: DiscordMessage[]): bigint | null {
+  let smallest: bigint | null = null;
+  for (const message of messages) {
+    const id = BigInt(message.id);
+    if (smallest === null || id < smallest) {
+      smallest = id;
+    }
+  }
+  return smallest;
+}
+
+/** Returns the later of two optional snowflakes. */
+function maxSnowflake(a: string | undefined, b: string | undefined): string | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return BigInt(a) > BigInt(b) ? a : b;
+}
+
+/** Returns the earlier of two optional snowflakes. */
+function minSnowflake(a: string | undefined, b: string | undefined): string | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return BigInt(a) < BigInt(b) ? a : b;
+}
+
+/** Sorts a copy of the page oldest-first. */
+function sortByIdAscending(messages: DiscordMessage[]): DiscordMessage[] {
+  return [...messages].sort((a, b) => {
+    const left = BigInt(a.id);
+    const right = BigInt(b.id);
+    if (left < right) return -1;
+    return left > right ? 1 : 0;
+  });
+}
+
+/** Exponential backoff for network and server errors: 1s, 2s, 4s, capped. */
+function backoffDelayMs(attempt: number): number {
+  return Math.min(BACKOFF_BASE_MS * 2 ** (attempt - 1), BACKOFF_CAP_MS);
+}
+
+/** Wait for a 429, honouring `retry_after`, the global floor and jitter. */
+function rateLimitWaitMs(error: DiscordApiError): number {
+  const base = (error.retryAfter ?? DEFAULT_RETRY_AFTER_SECONDS) * 1000;
+  const floor = error.global ? GLOBAL_RATE_LIMIT_FLOOR_MS : 0;
+  const jitterRange = RATE_LIMIT_JITTER_MAX_MS - RATE_LIMIT_JITTER_MIN_MS;
+  const jitter = RATE_LIMIT_JITTER_MIN_MS + Math.random() * jitterRange;
+  return Math.round(Math.max(base, floor) + jitter);
+}
+
+/** Builds a `failed` outcome from an API error. */
+function failureOutcome(error: DiscordApiError): MessageOutcome {
+  return { status: 'failed', reason: error.message, code: error.code };
+}
+
+/** Generates an identifier unique enough to correlate a resumed run. */
+function createRunId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** Copies saved filters onto a configuration object. */
+function applySavedFilters(
+  target: Partial<DeletionEngineOptions>,
+  filters: SavedFilters | undefined,
+): void {
+  if (!filters) return;
+  if (filters.content !== undefined) target.content = filters.content;
+  if (filters.hasLink !== undefined) target.hasLink = filters.hasLink;
+  if (filters.hasFile !== undefined) target.hasFile = filters.hasFile;
+  if (filters.includePinned !== undefined) target.includePinned = filters.includePinned;
+  if (filters.pattern !== undefined) target.pattern = filters.pattern;
+  if (filters.minId !== undefined) target.minId = filters.minId;
+  if (filters.maxId !== undefined) target.maxId = filters.maxId;
+}
+
+// =============================================================================
+// DeletionEngine
 // =============================================================================
 
 /**
  * Orchestrates the message deletion process.
  *
- * The engine maintains internal state and provides methods to start, pause,
- * resume, and stop deletion. It handles rate limiting, retries, and progress
- * tracking independently of any UI.
+ * The engine is UI-agnostic: it reports through callbacks and is driven with
+ * `configure()`, `start()`, `pause()`, `resume()` and `stop()`.
  */
 export class DeletionEngine {
   private apiClient: DiscordApiClient;
   private options: DeletionEngineOptions | null = null;
   private callbacks: DeletionEngineCallbacks = {};
 
-  private state: DeletionEngineState = {
-    running: false,
-    paused: false,
-    deletedCount: 0,
-    failedCount: 0,
-    skippedCount: 0,
-    totalFound: 0,
-    initialTotalFound: 0,
-    currentOffset: 0,
-  };
-
-  private stats: DeletionEngineStats = {
-    startTime: 0,
-    throttledCount: 0,
-    throttledTime: 0,
-    averagePing: 0,
-    estimatedTimeRemaining: -1,
-  };
+  private state: DeletionEngineState = createInitialState();
+  private stats: DeletionEngineStats = createInitialStats();
 
   private pingHistory: number[] = [];
   private stopRequested = false;
@@ -280,7 +439,7 @@ export class DeletionEngine {
   private pauseResolve: (() => void) | null = null;
   private compiledPattern: RegExp | null = null;
   private attemptedMessageIds: Set<string> = new Set();
-  private permanentlyFailedMessageIds: Set<string> = new Set();
+  private abortController: AbortController | null = null;
 
   // Rate limit smoothing state
   private consecutiveSuccesses = 0;
@@ -288,22 +447,31 @@ export class DeletionEngine {
   private readonly baselineDelay = BASELINE_DELETE_DELAY;
   private isThrottled = false;
 
-  // Persistence state
-  private lastProcessedMaxId: string | null = null;
+  // Cursor and persistence state
+  private cursorMaxId: string | undefined;
+  private lastProcessedId: string | null = null;
+  private totalsInitialised = false;
+  private runId = '';
+  private resumedState: ResumedRunState | null = null;
 
   /**
-   * Creates a new DeletionEngine instance.
+   * Creates a new DeletionEngine.
    *
-   * @param apiClient - The Discord API client for making requests
+   * @param apiClient - The Discord API client used for every request
    */
   constructor(apiClient: DiscordApiClient) {
     this.apiClient = apiClient;
   }
 
+  // =========================================================================
+  // Configuration
+  // =========================================================================
+
   /**
-   * Configures the engine with deletion options.
+   * Merges options into the engine configuration.
    *
-   * @param options - Partial options to merge with existing config
+   * @param options - Partial options to merge with the existing config
+   * @throws Error when the engine is running or the regex pattern is invalid
    */
   configure(options: Partial<DeletionEngineOptions>): void {
     if (this.state.running) {
@@ -315,17 +483,8 @@ export class DeletionEngine {
       ...options,
     } as DeletionEngineOptions;
 
-    // Validate and compile regex pattern if provided
     if (options.pattern !== undefined) {
-      if (options.pattern) {
-        const validationResult = validateRegex(options.pattern, 'i');
-        if (!validationResult.valid) {
-          throw new Error(`Invalid regex pattern: ${validationResult.error}`);
-        }
-        this.compiledPattern = validationResult.regex ?? null;
-      } else {
-        this.compiledPattern = null;
-      }
+      this.compiledPattern = compilePattern(options.pattern);
     }
   }
 
@@ -338,72 +497,58 @@ export class DeletionEngine {
     this.callbacks = callbacks;
   }
 
+  // =========================================================================
+  // Lifecycle
+  // =========================================================================
+
   /**
-   * Starts the deletion process.
+   * Runs the deletion until it completes, is stopped, or fails.
    *
-   * @throws Error if options are not configured or missing required fields
+   * Counters and cursor restored by {@link resumeFromSaved} are preserved.
+   *
+   * @throws Error when the engine is unconfigured, already running, or the run
+   *   is aborted by an unrecoverable API error
    */
   async start(): Promise<void> {
     if (this.state.running) {
       throw new Error('Engine is already running');
     }
-
-    if (!this.options) {
-      throw new Error('Engine not configured');
-    }
-
-    if (!this.options.authToken || !this.options.authorId || !this.options.channelId) {
-      throw new Error('Missing required options: authToken, authorId, channelId');
-    }
-
-    // Reset state for new run
-    this.resetState();
-    this.state.running = true;
-    this.stats.startTime = Date.now();
-    this.stopRequested = false;
-
+    this.assertConfigured();
+    this.prepareRun();
     this.callbacks.onStart?.(this.getState(), this.getStats());
 
+    let reason: DeletionStopReason = 'completed';
     try {
       await this.runDeletionLoop();
-
-      // Clear saved session on successful completion (not stopped by user)
-      if (!this.stopRequested) {
-        this.clearSavedSession();
+      if (this.stopRequested) {
+        reason = 'stopped';
       }
     } catch (error) {
+      reason = 'error';
       const err = error instanceof Error ? error : new Error(String(error));
       this.callbacks.onError?.(err);
       throw err;
     } finally {
-      this.state.running = false;
-      this.state.paused = false;
-      this.callbacks.onStop?.(this.getState(), this.getStats());
+      this.finishRun(reason);
     }
   }
 
-  /**
-   * Pauses the deletion process.
-   */
+  /** Pauses the deletion process. */
   pause(): void {
     if (!this.state.running || this.state.paused) {
       return;
     }
-
     this.state.paused = true;
     this.pausePromise = new Promise((resolve) => {
       this.pauseResolve = resolve;
     });
   }
 
-  /**
-   * Resumes a paused deletion process.
-   */
+  /** Resumes a paused deletion process. */
   resume(): void {
     if (!this.state.paused) {
       return;
     }
-
     this.state.paused = false;
     this.pauseResolve?.();
     this.pausePromise = null;
@@ -412,1070 +557,937 @@ export class DeletionEngine {
 
   /**
    * Stops the deletion process.
+   *
+   * Any in-flight wait (search delay, rate limit wait, backoff) is aborted, so
+   * the run unwinds immediately rather than at the end of the current timer.
    */
   stop(): void {
     this.stopRequested = true;
     if (this.state.paused) {
-      this.resume(); // Unblock the pause to allow clean exit
+      this.resume();
     }
-  }
-
-  /**
-   * Preview messages that would be deleted without actually deleting them.
-   * Satisfies SPEC requirements PRV-1, PRV-2, PRV-3.
-   *
-   * @returns Preview result with total count, sample messages, and estimated time
-   */
-  async preview(): Promise<{
-    totalCount: number;
-    sampleMessages: DiscordMessage[];
-    estimatedTimeMs: number;
-  }> {
+    this.abortController?.abort();
     if (this.state.running) {
-      throw new Error('Cannot preview while running');
+      this.persistProgress();
     }
-
-    if (!this.options) {
-      throw new Error('Engine not configured');
-    }
-
-    if (!this.options.authToken || !this.options.authorId || !this.options.channelId) {
-      throw new Error('Missing required options: authToken, authorId, channelId');
-    }
-
-    const opts = this.options;
-
-    // Build search params
-    const searchParams: Parameters<typeof this.apiClient.searchMessages>[0] = {
-      channelId: opts.channelId,
-      authorId: opts.authorId,
-      offset: 0,
-    };
-
-    if (opts.guildId !== undefined) searchParams.guildId = opts.guildId;
-    if (opts.content !== undefined) searchParams.content = opts.content;
-    if (opts.hasLink !== undefined) searchParams.hasLink = opts.hasLink;
-    if (opts.hasFile !== undefined) searchParams.hasFile = opts.hasFile;
-    if (opts.minId !== undefined) searchParams.minId = opts.minId;
-    if (opts.maxId !== undefined) searchParams.maxId = opts.maxId;
-    if (opts.includePinned !== undefined) searchParams.includePinned = opts.includePinned;
-
-    // Perform a single search to get total count and sample messages
-    const result = await this.apiClient.searchMessages(searchParams);
-
-    // Extract messages from nested array structure
-    const messages: DiscordMessage[] = [];
-    for (const messageGroup of result.messages) {
-      for (const msg of messageGroup) {
-        messages.push(msg);
-      }
-    }
-
-    // Filter to only deletable messages for the sample
-    const deletableMessages = this.filterDeletableMessages(messages);
-
-    // Calculate estimated time based on total count
-    const totalCount = result.total_results;
-    const deleteDelay = opts.deleteDelay ?? DEFAULT_DELETE_DELAY;
-    const searchDelay = opts.searchDelay ?? DEFAULT_SEARCH_DELAY;
-    const pagesNeeded = Math.ceil(totalCount / MESSAGES_PER_PAGE);
-    const estimatedTimeMs = totalCount * deleteDelay + pagesNeeded * searchDelay;
-
-    return {
-      totalCount,
-      sampleMessages: deletableMessages.slice(0, 10), // Return up to 10 samples
-      estimatedTimeMs,
-    };
   }
 
-  /**
-   * Returns a copy of the current state.
-   */
+  /** Returns a copy of the current state. */
   getState(): DeletionEngineState {
     return { ...this.state };
   }
 
-  /**
-   * Returns a copy of the current statistics.
-   */
+  /** Returns a copy of the current statistics. */
   getStats(): DeletionEngineStats {
     return { ...this.stats };
   }
 
   // =========================================================================
-  // Persistence Methods
+  // Preview
   // =========================================================================
 
   /**
-   * Checks if there is a saved session that can be resumed.
+   * Previews what a run would delete, without deleting anything.
    *
-   * @returns true if a valid, non-expired session exists
+   * `totalCount` is Discord's total for the search. When `filtersApplied` is
+   * true, client-side filtering (pattern, pinned, message type, ownership) can
+   * exclude some of those, so the count is an upper bound.
+   *
+   * @returns Total count, up to ten sample messages, a duration estimate, and
+   *   whether client-side filters apply
    */
+  async preview(): Promise<PreviewResult> {
+    if (this.state.running) {
+      throw new Error('Cannot preview while running');
+    }
+    this.assertConfigured();
+    const opts = this.options as DeletionEngineOptions;
+
+    const response = await this.apiClient.searchMessages(this.buildSearchParams({}));
+    const messages = extractHits(response);
+    const deletable = messages.filter((message) => this.classifyExclusion(message) === null);
+
+    const totalCount = response.total_results ?? 0;
+    const pagesNeeded = Math.ceil(totalCount / MESSAGES_PER_PAGE);
+    const estimatedTimeMs =
+      totalCount * this.getDeleteDelay() + pagesNeeded * this.getSearchDelay();
+
+    return {
+      totalCount,
+      sampleMessages: deletable.slice(0, 10),
+      estimatedTimeMs,
+      filtersApplied:
+        Boolean(opts.pattern) ||
+        opts.includePinned !== true ||
+        deletable.length !== messages.length,
+    };
+  }
+
+  // =========================================================================
+  // Persistence
+  // =========================================================================
+
+  /** Whether a resumable session exists for the configured author. */
   hasSavedSession(): boolean {
-    return hasExistingSession();
+    return this.loadSavedSession() !== null;
   }
 
-  /**
-   * Loads a saved session if one exists.
-   *
-   * @returns The saved progress if it exists and is valid, null otherwise
-   */
+  /** Loads the newest resumable session for the configured author. */
   loadSavedSession(): SavedProgress | null {
-    return loadProgress();
+    return this.options ? findResumableSession(this.options.authorId) : null;
   }
 
   /**
-   * Configures the engine from a saved progress state.
-   * This allows resuming a previously interrupted deletion session.
+   * Configures the engine from a saved session.
+   *
+   * The next {@link start} preserves the restored counters and resumes from the
+   * saved cursor instead of starting over.
    *
    * @param progress - The saved progress to resume from
-   * @throws Error if the engine is currently running
+   * @throws Error when the engine is currently running
    */
   resumeFromSaved(progress: SavedProgress): void {
     if (this.state.running) {
       throw new Error('Cannot resume while running');
     }
 
-    // Configure the engine with the saved state
     const configOptions: Partial<DeletionEngineOptions> = {
       authorId: progress.authorId,
-      maxId: progress.lastMaxId,
+      deletionOrder: progress.deletionOrder,
     };
-
-    if (progress.guildId) {
-      configOptions.guildId = progress.guildId;
-    }
-
-    if (progress.channelId) {
-      configOptions.channelId = progress.channelId;
-    }
-
-    // Restore filters if they were saved
-    if (progress.filters) {
-      if (progress.filters.content !== undefined) {
-        configOptions.content = progress.filters.content;
-      }
-      if (progress.filters.hasLink !== undefined) {
-        configOptions.hasLink = progress.filters.hasLink;
-      }
-      if (progress.filters.hasFile !== undefined) {
-        configOptions.hasFile = progress.filters.hasFile;
-      }
-      if (progress.filters.includePinned !== undefined) {
-        configOptions.includePinned = progress.filters.includePinned;
-      }
-      if (progress.filters.pattern !== undefined) {
-        configOptions.pattern = progress.filters.pattern;
-      }
-      if (progress.filters.minId !== undefined) {
-        configOptions.minId = progress.filters.minId;
-      }
-    }
+    if (progress.guildId) configOptions.guildId = progress.guildId;
+    if (progress.channelId) configOptions.channelId = progress.channelId;
+    applySavedFilters(configOptions, progress.filters);
+    if (progress.cursor.maxId) configOptions.maxId = progress.cursor.maxId;
+    if (progress.cursor.minId) configOptions.minId = progress.cursor.minId;
 
     this.configure(configOptions);
 
-    // Restore counts from saved progress
-    this.state.deletedCount = progress.deletedCount;
-    this.state.totalFound = progress.totalFound;
-    // Restore initialTotalFound if available, otherwise use totalFound for backward compatibility
-    this.state.initialTotalFound = progress.initialTotalFound ?? progress.totalFound;
-    this.lastProcessedMaxId = progress.lastMaxId;
+    this.resumedState = {
+      runId: progress.runId,
+      deletedCount: progress.deletedCount,
+      failedCount: progress.failedCount,
+      skippedCount: progress.skippedCount,
+      alreadyGoneCount: progress.alreadyGoneCount,
+      totalFound: progress.totalFound,
+      initialTotalFound: progress.initialTotalFound,
+      cursor: progress.cursor,
+    };
   }
 
-  /**
-   * Clears any saved session from localStorage.
-   */
+  /** Clears the saved session for the configured author and target. */
   clearSavedSession(): void {
-    clearProgress();
+    const opts = this.options;
+    if (!opts) return;
+    clearProgress(opts.authorId, targetKeyFor(opts));
   }
 
-  /**
-   * Saves the current progress to localStorage.
-   * Called periodically during deletion (every 10 deletions).
-   */
-  private saveProgressPeriodically(): void {
+  // =========================================================================
+  // Private - run setup and teardown
+  // =========================================================================
+
+  /** Throws unless the engine has everything it needs to run. */
+  private assertConfigured(): void {
     if (!this.options) {
-      return;
+      throw new Error('Engine not configured');
+    }
+    if (!this.options.authToken || !this.options.authorId || !this.options.channelId) {
+      throw new Error('Missing required options: authToken, authorId, channelId');
+    }
+  }
+
+  /** Resets per-run state, applying anything restored from a saved session. */
+  private prepareRun(): void {
+    const resumed = this.resumedState;
+    this.resumedState = null;
+
+    this.state = createInitialState();
+    this.stats = createInitialStats();
+    this.pingHistory = [];
+    this.pausePromise = null;
+    this.pauseResolve = null;
+    this.consecutiveSuccesses = 0;
+    this.currentDelay = this.baselineDelay;
+    this.isThrottled = false;
+    this.attemptedMessageIds = new Set();
+    this.lastProcessedId = null;
+    this.totalsInitialised = false;
+    this.cursorMaxId = this.options?.maxId;
+    this.stopRequested = false;
+    this.abortController = new AbortController();
+    this.runId = resumed?.runId ?? createRunId();
+
+    if (resumed) {
+      this.applyResumedState(resumed);
     }
 
-    // Build the saved progress object
+    this.state.running = true;
+    this.stats.startTime = Date.now();
+  }
+
+  /** Restores counters and cursor from a saved session. */
+  private applyResumedState(resumed: ResumedRunState): void {
+    this.state.deletedCount = resumed.deletedCount;
+    this.state.failedCount = resumed.failedCount;
+    this.state.skippedCount = resumed.skippedCount;
+    this.state.alreadyGoneCount = resumed.alreadyGoneCount;
+    this.state.totalFound = resumed.totalFound;
+    this.state.initialTotalFound = resumed.initialTotalFound;
+    this.totalsInitialised = resumed.initialTotalFound > 0;
+    if (resumed.cursor.maxId) {
+      this.cursorMaxId = resumed.cursor.maxId;
+    }
+  }
+
+  /** Ends the run: settles state, persists or clears progress, notifies. */
+  private finishRun(reason: DeletionStopReason): void {
+    this.state.running = false;
+    this.state.paused = false;
+    this.abortController = null;
+    this.setStatus(undefined);
+
+    if (reason === 'completed') {
+      this.clearSavedSession();
+    } else {
+      this.persistProgress();
+    }
+
+    this.callbacks.onStop?.(this.getState(), this.getStats(), { reason });
+  }
+
+  /** Writes the current progress to page storage. */
+  private persistProgress(): void {
+    const opts = this.options;
+    if (!opts) return;
+
     const progress: SavedProgress = {
-      authorId: this.options.authorId,
-      lastMaxId: this.lastProcessedMaxId ?? this.options.maxId ?? '',
+      version: 2,
+      runId: this.runId || createRunId(),
+      authorId: opts.authorId,
+      deletionOrder: opts.deletionOrder ?? 'newest',
+      cursor: this.buildCursor(),
       deletedCount: this.state.deletedCount,
+      failedCount: this.state.failedCount,
+      skippedCount: this.state.skippedCount,
+      alreadyGoneCount: this.state.alreadyGoneCount,
       totalFound: this.state.totalFound,
       initialTotalFound: this.state.initialTotalFound,
       timestamp: Date.now(),
     };
+    if (opts.guildId) progress.guildId = opts.guildId;
+    if (opts.channelId) progress.channelId = opts.channelId;
 
-    if (this.options.guildId) {
-      progress.guildId = this.options.guildId;
-    }
-
-    if (this.options.channelId) {
-      progress.channelId = this.options.channelId;
-    }
-
-    // Save relevant filters
-    const filters: SavedFilters = {};
-    let hasFilters = false;
-
-    if (this.options.content !== undefined) {
-      filters.content = this.options.content;
-      hasFilters = true;
-    }
-    if (this.options.hasLink !== undefined) {
-      filters.hasLink = this.options.hasLink;
-      hasFilters = true;
-    }
-    if (this.options.hasFile !== undefined) {
-      filters.hasFile = this.options.hasFile;
-      hasFilters = true;
-    }
-    if (this.options.includePinned !== undefined) {
-      filters.includePinned = this.options.includePinned;
-      hasFilters = true;
-    }
-    if (this.options.pattern !== undefined) {
-      filters.pattern = this.options.pattern;
-      hasFilters = true;
-    }
-    if (this.options.minId !== undefined) {
-      filters.minId = this.options.minId;
-      hasFilters = true;
-    }
-
-    if (hasFilters) {
-      progress.filters = filters;
-    }
+    const filters = this.buildSavedFilters();
+    if (filters) progress.filters = filters;
 
     saveProgress(progress);
   }
 
-  // =========================================================================
-  // Private Methods
-  // =========================================================================
-
-  /**
-   * Resets the internal state for a new deletion run.
-   */
-  private resetState(): void {
-    this.state = {
-      running: false,
-      paused: false,
-      deletedCount: 0,
-      failedCount: 0,
-      skippedCount: 0,
-      totalFound: 0,
-      initialTotalFound: 0,
-      currentOffset: 0,
-    };
-
-    this.stats = {
-      startTime: 0,
-      throttledCount: 0,
-      throttledTime: 0,
-      averagePing: 0,
-      estimatedTimeRemaining: -1,
-    };
-
-    this.pingHistory = [];
-    this.pausePromise = null;
-    this.pauseResolve = null;
-
-    // Reset rate limit smoothing state
-    this.consecutiveSuccesses = 0;
-    this.currentDelay = this.baselineDelay;
-    this.isThrottled = false;
-
-    // Reset persistence state
-    this.lastProcessedMaxId = null;
-
-    // Reset attempted message tracking
-    this.attemptedMessageIds = new Set();
-    this.permanentlyFailedMessageIds = new Set();
+  /** Builds the direction-specific resume cursor. */
+  private buildCursor(): SavedProgress['cursor'] {
+    if ((this.options?.deletionOrder ?? 'newest') === 'oldest') {
+      return this.lastProcessedId === null
+        ? {}
+        : { minId: (BigInt(this.lastProcessedId) + 1n).toString() };
+    }
+    return this.cursorMaxId === undefined ? {} : { maxId: this.cursorMaxId };
   }
 
-  /**
-   * Main deletion loop - searches for messages and deletes them.
-   *
-   * For 'newest' order (default): searches from offset 0 to handle the "shifting index" problem.
-   * For 'oldest' order: uses time-based windows to process messages from oldest to newest.
-   *
-   * Tracks attempted message IDs to handle stale search index returning
-   * already-deleted messages.
-   */
+  /** Snapshots the user's filters for a later resume, or null when there are none. */
+  private buildSavedFilters(): SavedFilters | null {
+    const opts = this.options;
+    if (!opts) return null;
+
+    const filters: SavedFilters = {};
+    let hasFilters = false;
+    if (opts.content !== undefined) {
+      filters.content = opts.content;
+      hasFilters = true;
+    }
+    if (opts.hasLink !== undefined) {
+      filters.hasLink = opts.hasLink;
+      hasFilters = true;
+    }
+    if (opts.hasFile !== undefined) {
+      filters.hasFile = opts.hasFile;
+      hasFilters = true;
+    }
+    if (opts.includePinned !== undefined) {
+      filters.includePinned = opts.includePinned;
+      hasFilters = true;
+    }
+    if (opts.pattern !== undefined) {
+      filters.pattern = opts.pattern;
+      hasFilters = true;
+    }
+    if (opts.minId !== undefined) {
+      filters.minId = opts.minId;
+      hasFilters = true;
+    }
+    if (opts.maxId !== undefined) {
+      filters.maxId = opts.maxId;
+      hasFilters = true;
+    }
+    return hasFilters ? filters : null;
+  }
+
+  // =========================================================================
+  // Private - deletion loops
+  // =========================================================================
+
+  /** Dispatches to the loop for the configured deletion order. */
   private async runDeletionLoop(): Promise<void> {
-    // Use window-based approach for oldest-first ordering
     if (this.options?.deletionOrder === 'oldest') {
       await this.runOldestFirstDeletionLoop();
       return;
     }
-
-    // Default: newest-first ordering
     await this.runNewestFirstDeletionLoop();
   }
 
   /**
-   * Deletion loop for newest-first ordering (default behavior).
-   * Uses offset 0 and lets Discord return newest messages first.
-   * When permanently failed messages block progress, uses maxId to skip past them.
+   * Newest-first loop.
+   *
+   * Each page is fetched with `max_id = cursor`; the cursor then moves strictly
+   * below the oldest id on the page, whether or not anything on it was
+   * deletable. That makes progress monotonic, so a page of pinned or
+   * non-matching messages can never be fetched twice.
    */
   private async runNewestFirstDeletionLoop(): Promise<void> {
     let emptyPageRetries = 0;
-    let hasMorePages = true;
-    // Track maxId for skipping past permanently failed messages
-    let skipMaxId: string | undefined;
 
-    while (hasMorePages && !this.stopRequested) {
-      // Check for pause
-      if (this.state.paused && this.pausePromise) {
-        await this.pausePromise;
-      }
+    while (!this.stopRequested) {
+      await this.waitWhilePaused();
+      const page = await this.searchWithRetry({ maxId: this.cursorMaxId });
+      if (this.stopRequested) return;
 
-      if (this.stopRequested) {
-        break;
-      }
-
-      // Search for messages (always from offset 0, but may use skipMaxId to skip past blocked messages)
-      const messages = await this.searchWithRetry(skipMaxId);
-
-      // Filter out messages we've already attempted to delete
-      // This handles stale search index returning already-deleted messages
-      const newMessages = messages.filter((msg) => !this.attemptedMessageIds.has(msg.id));
-
-      if (newMessages.length === 0) {
+      if (page.length === 0) {
+        if (!(await this.retryEmptyPage(emptyPageRetries))) return;
         emptyPageRetries++;
-
-        // Check if we should keep trying:
-        // 1. If the raw search returned 0 messages, Discord's index is caught up - stop
-        // 2. If totalFound > 0 but we got empty filtered results, index might be stale
-        const rawSearchReturnedMessages = messages.length > 0;
-
-        // Check if all returned messages are permanently undeletable (threads, permissions, etc.)
-        const allPermanentlyFailed =
-          rawSearchReturnedMessages &&
-          messages.every((msg) => this.permanentlyFailedMessageIds.has(msg.id));
-
-        if (allPermanentlyFailed) {
-          // Check if there are likely more messages beyond the permanently failed ones
-          // Compare totalFound (remaining messages) to permanently failed count
-          // If totalFound > permanently failed, there are messages we haven't tried yet
-          const untried = this.state.totalFound - this.permanentlyFailedMessageIds.size;
-
-          if (untried > 0) {
-            // There are more messages - skip past the blocked ones using maxId
-            // Find the oldest message in the current batch and search before it
-            const oldestInBatch = messages.reduce((oldest, msg) =>
-              BigInt(msg.id) < BigInt(oldest.id) ? msg : oldest,
-            );
-            skipMaxId = oldestInBatch.id;
-            emptyPageRetries = 0; // Reset retries since we're trying a new search range
-            await this.delay(this.getSearchDelay());
-            continue;
-          }
-          // All remaining messages cannot be deleted - exit cleanly
-          hasMorePages = false;
-          break;
-        }
-
-        const apiReportsMoreMessages = this.state.totalFound > 0 && rawSearchReturnedMessages;
-
-        if (emptyPageRetries >= MAX_EMPTY_PAGE_RETRIES && !apiReportsMoreMessages) {
-          // No more messages to delete - either API confirms nothing left or index is caught up
-          hasMorePages = false;
-        } else if (emptyPageRetries >= MAX_EMPTY_PAGE_RETRIES && apiReportsMoreMessages) {
-          // API still reports messages but they're all already attempted
-          // Only reset retry counter if there are non-permanently-failed messages
-          const hasRecoverableMessages = messages.some(
-            (msg) => !this.permanentlyFailedMessageIds.has(msg.id),
-          );
-
-          if (hasRecoverableMessages) {
-            // Discord's index is stale - reset retry counter and keep trying
-            emptyPageRetries = Math.floor(MAX_EMPTY_PAGE_RETRIES / 2);
-          } else {
-            // All remaining messages are permanently failed - check if we should skip
-            // Compare totalFound to permanently failed count (not total processed)
-            const untried = this.state.totalFound - this.permanentlyFailedMessageIds.size;
-            if (untried > 0) {
-              // Skip past blocked messages
-              const oldestInBatch = messages.reduce((oldest, msg) =>
-                BigInt(msg.id) < BigInt(oldest.id) ? msg : oldest,
-              );
-              skipMaxId = oldestInBatch.id;
-              emptyPageRetries = 0;
-            } else {
-              hasMorePages = false;
-            }
-          }
-        }
-
-        // Use exponential backoff - wait longer with each empty page
-        // Base delay * (multiplier ^ retries) e.g., 10s, 13s, 16.9s...
-        const backoffDelay = Math.round(
-          this.getSearchDelay() * EMPTY_PAGE_BACKOFF_MULTIPLIER ** (emptyPageRetries - 1),
-        );
-        await this.delay(backoffDelay);
         continue;
       }
 
-      // Reset empty page counter and skipMaxId on successful fetch of new messages
       emptyPageRetries = 0;
-      skipMaxId = undefined;
-
-      // Reset empty page counter on successful fetch of new messages
-      emptyPageRetries = 0;
-
-      // Filter messages by type and pattern
-      const deletableMessages = this.filterDeletableMessages(newMessages);
-
-      // Delete each message (already in newest-first order from Discord)
-      await this.deleteMessagesInBatch(deletableMessages);
-
-      // Wait between search requests
+      const next = this.advanceCursor(page, this.cursorMaxId, this.options?.minId);
+      await this.processMessages(page);
+      if (next === null) return;
+      this.cursorMaxId = next;
       await this.delay(this.getSearchDelay());
     }
   }
 
   /**
-   * Deletion loop for oldest-first ordering.
-   * Uses time-based windows to process messages chronologically from oldest to newest.
+   * Oldest-first loop.
+   *
+   * Locates the oldest message, splits the span up to the newest message into
+   * week-long windows, and walks them in order.
    */
   private async runOldestFirstDeletionLoop(): Promise<void> {
-    // First, find the oldest message to determine our starting point
-    const oldestDate = await this.findOldestMessageDate();
-    if (!oldestDate) {
-      // No messages found
-      return;
-    }
+    const bounds = await this.findMessageBounds();
+    if (!bounds || this.stopRequested) return;
 
-    // Generate time windows from oldest to newest
-    const windows = this.generateTimeWindows(oldestDate);
-
-    // Process each window in order (oldest first)
-    for (const window of windows) {
-      if (this.stopRequested) {
-        break;
-      }
-
-      // Process all messages in this time window
+    for (const window of this.generateTimeWindows(bounds.oldest, bounds.newest)) {
+      if (this.stopRequested) return;
       await this.processTimeWindow(window.minId, window.maxId);
     }
   }
 
-  /**
-   * Processes all messages within a specific time window.
-   * Keeps searching until no more messages are found in the window.
-   */
+  /** Walks one time window with the same monotonic cursor as the main loop. */
   private async processTimeWindow(windowMinId: string, windowMaxId: string): Promise<void> {
+    let cursor: string | undefined = windowMaxId;
     let emptyPageRetries = 0;
-    let hasMoreInWindow = true;
 
-    while (hasMoreInWindow && !this.stopRequested) {
-      // Check for pause
-      if (this.state.paused && this.pausePromise) {
-        await this.pausePromise;
-      }
+    while (!this.stopRequested) {
+      await this.waitWhilePaused();
+      const page = await this.searchWithRetry({ minId: windowMinId, maxId: cursor });
+      if (this.stopRequested) return;
 
-      if (this.stopRequested) {
-        break;
-      }
-
-      // Search for messages within this window
-      const messages = await this.searchWithConstraints(windowMinId, windowMaxId);
-
-      // Filter out messages we've already attempted to delete
-      const newMessages = messages.filter((msg) => !this.attemptedMessageIds.has(msg.id));
-
-      if (newMessages.length === 0) {
+      if (page.length === 0) {
+        if (!(await this.retryEmptyPage(emptyPageRetries))) return;
         emptyPageRetries++;
-
-        // Check if all returned messages are permanently undeletable
-        const rawSearchReturnedMessages = messages.length > 0;
-        const allPermanentlyFailed =
-          rawSearchReturnedMessages &&
-          messages.every((msg) => this.permanentlyFailedMessageIds.has(msg.id));
-
-        if (allPermanentlyFailed) {
-          // All remaining messages in this window cannot be deleted - move to next window
-          hasMoreInWindow = false;
-          break;
-        }
-
-        if (emptyPageRetries >= MAX_EMPTY_PAGE_RETRIES) {
-          // Check if there are recoverable messages before giving up on this window
-          const hasRecoverableMessages =
-            rawSearchReturnedMessages &&
-            messages.some((msg) => !this.permanentlyFailedMessageIds.has(msg.id));
-
-          if (!hasRecoverableMessages) {
-            // No more messages in this window
-            hasMoreInWindow = false;
-          }
-          // Otherwise continue with backoff
-        }
-
-        // Use exponential backoff
-        const backoffDelay = Math.round(
-          this.getSearchDelay() * EMPTY_PAGE_BACKOFF_MULTIPLIER ** (emptyPageRetries - 1),
-        );
-        await this.delay(backoffDelay);
         continue;
       }
 
-      // Reset empty page counter
       emptyPageRetries = 0;
-
-      // Filter messages by type and pattern
-      const deletableMessages = this.filterDeletableMessages(newMessages);
-
-      // Sort by ID ascending (oldest first within the batch)
-      deletableMessages.sort((a, b) => {
-        return BigInt(a.id) < BigInt(b.id) ? -1 : BigInt(a.id) > BigInt(b.id) ? 1 : 0;
-      });
-
-      // Delete each message
-      await this.deleteMessagesInBatch(deletableMessages);
-
-      // Wait between search requests
+      const next = this.advanceCursor(page, cursor, windowMinId);
+      await this.processMessages(sortByIdAscending(page));
+      if (next === null) return;
+      cursor = next;
       await this.delay(this.getSearchDelay());
     }
   }
 
   /**
-   * Deletes a batch of messages, handling pause/stop and tracking progress.
+   * Decides whether an empty page is a stale index or the end of the range.
+   *
+   * @param retries - Empty pages seen so far for this cursor
+   * @returns True when the caller should search again
    */
-  private async deleteMessagesInBatch(messages: DiscordMessage[]): Promise<void> {
+  private async retryEmptyPage(retries: number): Promise<boolean> {
+    if (this.state.totalFound <= 0 || retries >= MAX_EMPTY_PAGE_RETRIES) {
+      return false;
+    }
+    await this.delay(Math.round(this.getSearchDelay() * EMPTY_PAGE_BACKOFF_MULTIPLIER ** retries));
+    return !this.stopRequested;
+  }
+
+  /**
+   * Moves the cursor strictly below the oldest message on the page.
+   *
+   * `max_id` may be inclusive, so a cursor that did not move is decremented by
+   * one. Combined, this guarantees every iteration makes progress and no
+   * message is stepped over.
+   *
+   * @returns The next cursor, or null when the range is exhausted
+   */
+  private advanceCursor(
+    page: DiscordMessage[],
+    current: string | undefined,
+    floorId: string | undefined,
+  ): string | null {
+    let next = minMessageId(page);
+    if (next === null) return null;
+    if (current !== undefined && next >= BigInt(current)) {
+      next = BigInt(current) - 1n;
+    }
+    if (next < 0n) return null;
+    if (floorId !== undefined && next < BigInt(floorId)) return null;
+    return next.toString();
+  }
+
+  // =========================================================================
+  // Private - message processing
+  // =========================================================================
+
+  /** Processes a page: filters, deletes, reports an outcome for each message. */
+  private async processMessages(messages: DiscordMessage[]): Promise<void> {
     for (const message of messages) {
-      if (this.stopRequested) {
-        break;
-      }
-
-      // Check for pause
-      if (this.state.paused && this.pausePromise) {
-        await this.pausePromise;
-      }
-
-      if (this.stopRequested) {
-        break;
-      }
-
-      // Mark this message as attempted before trying to delete
+      await this.waitWhilePaused();
+      if (this.stopRequested) return;
+      if (this.attemptedMessageIds.has(message.id)) continue;
       this.attemptedMessageIds.add(message.id);
 
-      const success = await this.deleteWithRetry(message);
-
-      if (success) {
-        this.state.deletedCount++;
-
-        // Track last processed message ID for persistence
-        this.lastProcessedMaxId = message.id;
-
-        // Save progress every 10 deletions
-        if (shouldSaveProgress(this.state.deletedCount)) {
-          this.saveProgressPeriodically();
-        }
-      } else {
-        this.state.failedCount++;
-        // Mark as permanently failed (won't retry) - handles 403 errors from threads, permissions, etc.
-        this.permanentlyFailedMessageIds.add(message.id);
-        this.state.skippedCount++;
+      const excluded = this.classifyExclusion(message);
+      if (excluded) {
+        this.recordOutcome(message, excluded);
+        continue;
       }
 
-      this.callbacks.onProgress?.(this.getState(), this.getStats(), message);
-
-      // Update estimated time remaining
-      this.updateEstimatedTime();
-
-      // Wait between deletes
+      this.recordOutcome(message, await this.deleteWithRetry(message));
       await this.delay(this.getDeleteDelay());
     }
   }
 
   /**
-   * Searches for messages with retry logic for rate limits.
+   * Applies the client-side filters and the ownership guard.
    *
-   * @param overrideMaxId - Optional maxId to use instead of configured one (for skipping past blocked messages)
+   * @returns A `skipped` outcome, or null when the message should be deleted
    */
-  private async searchWithRetry(overrideMaxId?: string): Promise<DiscordMessage[]> {
-    const maxRetries = this.options?.maxRetries ?? DEFAULT_MAX_RETRIES;
-    let retries = 0;
-
-    while (retries < maxRetries) {
-      try {
-        const startTime = Date.now();
-
-        // Safe to access after configure() validation
-        const opts = this.options;
-        if (!opts) {
-          throw new Error('Options not configured');
-        }
-
-        // Build search params, only including defined optional properties
-        // Always search from offset 0 - we track attempted messages separately
-        // to handle the "shifting index" problem when deleting
-        const searchParams: Parameters<typeof this.apiClient.searchMessages>[0] = {
-          channelId: opts.channelId,
-          authorId: opts.authorId,
-          offset: 0,
-        };
-        if (opts.guildId !== undefined) searchParams.guildId = opts.guildId;
-        if (opts.content !== undefined) searchParams.content = opts.content;
-        if (opts.hasLink !== undefined) searchParams.hasLink = opts.hasLink;
-        if (opts.hasFile !== undefined) searchParams.hasFile = opts.hasFile;
-        if (opts.minId !== undefined) searchParams.minId = opts.minId;
-
-        // Use overrideMaxId to skip past permanently failed messages, otherwise use configured maxId
-        if (overrideMaxId !== undefined) {
-          // If both override and configured maxId exist, use the earlier (smaller) one
-          if (opts.maxId !== undefined) {
-            searchParams.maxId =
-              BigInt(overrideMaxId) < BigInt(opts.maxId) ? overrideMaxId : opts.maxId;
-          } else {
-            searchParams.maxId = overrideMaxId;
-          }
-        } else if (opts.maxId !== undefined) {
-          searchParams.maxId = opts.maxId;
-        }
-
-        if (opts.includePinned !== undefined) searchParams.includePinned = opts.includePinned;
-
-        const response = await this.apiClient.searchMessages(searchParams);
-
-        const ping = Date.now() - startTime;
-        this.recordPing(ping);
-
-        // Update current total from response
-        this.state.totalFound = response.total_results;
-
-        // Set initial total only once on first search (used for progress calculation)
-        if (this.state.initialTotalFound === 0) {
-          this.state.initialTotalFound = response.total_results;
-        }
-
-        // Extract messages from nested array structure
-        const messages = response.messages
-          .map((group) => group[0])
-          .filter((msg): msg is DiscordMessage => msg !== undefined);
-
-        return messages;
-      } catch (error) {
-        const err = error as Error & { statusCode?: number; retryAfter?: number };
-
-        if (err.statusCode === 429) {
-          // Rate limited
-          const waitTime = (err.retryAfter ?? 5) * 1000;
-          this.stats.throttledCount++;
-          this.stats.throttledTime += waitTime;
-
-          await this.delay(waitTime);
-          retries++;
-        } else {
-          // Other error - don't retry
-          throw error;
-        }
-      }
-    }
-
-    throw new Error(`Search failed after ${maxRetries} retries`);
-  }
-
-  /**
-   * Deletes a message with retry logic for rate limits.
-   * Implements smooth rate limit recovery with gradual delay adjustment.
-   */
-  private async deleteWithRetry(message: DiscordMessage): Promise<boolean> {
-    const maxRetries = this.options?.maxRetries ?? DEFAULT_MAX_RETRIES;
-    let retries = 0;
-
-    while (retries < maxRetries) {
-      try {
-        const startTime = Date.now();
-
-        const response = await this.apiClient.deleteMessage(message.channel_id, message.id);
-
-        const ping = Date.now() - startTime;
-        this.recordPing(ping);
-
-        if (response.success) {
-          // Handle successful deletion - smooth rate limit recovery
-          this.handleSuccessfulDeletion();
-        }
-
-        return response.success;
-      } catch (error) {
-        const err = error as Error & { statusCode?: number; retryAfter?: number };
-
-        if (err.statusCode === 429) {
-          // Rate limited - apply throttling
-          const retryAfterMs = (err.retryAfter ?? 1) * 1000;
-          this.handleRateLimit(retryAfterMs);
-
-          this.stats.throttledCount++;
-          this.stats.throttledTime += retryAfterMs;
-
-          await this.delay(retryAfterMs);
-          retries++;
-        } else if (err.statusCode === 404) {
-          // Message already deleted
-          return true;
-        } else if (err.statusCode === 403) {
-          // Permission denied - can't delete this message
-          return false;
-        } else {
-          // Other error - don't retry
-          this.callbacks.onError?.(err);
-          return false;
-        }
-      }
-    }
-
-    return false;
-  }
-
-  /**
-   * Handles successful deletion for smooth rate limit recovery.
-   * After consecutive successes, gradually decreases delay toward baseline.
-   */
-  private handleSuccessfulDeletion(): void {
-    if (this.isThrottled) {
-      this.consecutiveSuccesses++;
-
-      // After threshold consecutive successes, decrease delay by 10% toward baseline
-      if (this.consecutiveSuccesses >= THROTTLE_RECOVERY_THRESHOLD) {
-        const gap = this.currentDelay - this.baselineDelay;
-        const decrease = gap * THROTTLE_RECOVERY_PERCENTAGE;
-        this.currentDelay = Math.max(this.baselineDelay, this.currentDelay - decrease);
-
-        // Reset counter for next batch of successes
-        this.consecutiveSuccesses = 0;
-
-        // Check if we've recovered to baseline
-        if (this.currentDelay <= this.baselineDelay) {
-          this.currentDelay = this.baselineDelay;
-          this.isThrottled = false;
-        }
-
-        // Notify callback of rate limit change
-        this.callbacks.onRateLimitChange?.({
-          isThrottled: this.isThrottled,
-          currentDelay: this.currentDelay,
-        });
-      }
-    }
-  }
-
-  /**
-   * Handles rate limit (429) response.
-   * Increases delay by 50% of the gap toward retry_after value.
-   */
-  private handleRateLimit(retryAfterMs: number): void {
-    const wasThrottled = this.isThrottled;
-
-    this.isThrottled = true;
-    this.consecutiveSuccesses = 0;
-
-    // Increase delay by 50% of the gap toward retry_after
-    const gap = retryAfterMs - this.currentDelay;
-    if (gap > 0) {
-      this.currentDelay = this.currentDelay + gap * THROTTLE_INCREASE_PERCENTAGE;
-    }
-
-    // Notify callback of rate limit change (only if state changed or this is a new throttle)
-    if (!wasThrottled || this.callbacks.onRateLimitChange) {
-      this.callbacks.onRateLimitChange?.({
-        isThrottled: this.isThrottled,
-        currentDelay: this.currentDelay,
-      });
-    }
-  }
-
-  /**
-   * Filters messages to only include deletable types and matching patterns.
-   */
-  private filterDeletableMessages(messages: DiscordMessage[]): DiscordMessage[] {
-    return messages.filter((message) => {
-      // Check message type
-      if (!DELETABLE_MESSAGE_TYPES.has(message.type)) {
-        return false;
-      }
-
-      // Thread detection: message's channel_id differs from search target
-      // Only applies to channel-specific searches (not guild-wide)
-      if (
-        this.options?.channelId &&
-        !this.options.guildId &&
-        message.channel_id !== this.options.channelId
-      ) {
-        // Message is in a thread - mark as permanently failed and skip
-        this.permanentlyFailedMessageIds.add(message.id);
-        this.attemptedMessageIds.add(message.id);
-        this.state.skippedCount++;
-        return false;
-      }
-
-      // Check pinned status
-      if (message.pinned && !this.options?.includePinned) {
-        return false;
-      }
-
-      // Check regex pattern
-      if (this.compiledPattern && !this.compiledPattern.test(message.content)) {
-        return false;
-      }
-
-      return true;
-    });
-  }
-
-  /**
-   * Records a ping time for average calculation.
-   */
-  private recordPing(ping: number): void {
-    this.pingHistory.push(ping);
-
-    // Keep only last 20 pings for rolling average
-    if (this.pingHistory.length > 20) {
-      this.pingHistory.shift();
-    }
-
-    // Calculate average
-    const sum = this.pingHistory.reduce((a, b) => a + b, 0);
-    this.stats.averagePing = Math.round(sum / this.pingHistory.length);
-  }
-
-  /**
-   * Updates the estimated time remaining based on current progress.
-   */
-  private updateEstimatedTime(): void {
-    if (this.state.initialTotalFound === 0 || this.state.deletedCount === 0) {
-      this.stats.estimatedTimeRemaining = -1;
-      return;
-    }
-
-    const elapsedTime = Date.now() - this.stats.startTime;
-    const messagesProcessed = this.state.deletedCount + this.state.failedCount;
-    const messagesRemaining = this.state.initialTotalFound - messagesProcessed;
-
-    if (messagesProcessed > 0) {
-      const timePerMessage = elapsedTime / messagesProcessed;
-      this.stats.estimatedTimeRemaining = Math.round(timePerMessage * messagesRemaining);
-    }
-  }
-
-  /**
-   * Returns the configured search delay.
-   */
-  private getSearchDelay(): number {
-    return this.options?.searchDelay ?? DEFAULT_SEARCH_DELAY;
-  }
-
-  /**
-   * Returns the current delete delay, considering rate limit smoothing.
-   * Uses the dynamically adjusted delay when throttled, otherwise uses configured delay.
-   */
-  private getDeleteDelay(): number {
-    // If throttled, use the dynamically adjusted delay
-    if (this.isThrottled) {
-      return this.currentDelay;
-    }
-    // Otherwise use configured delay or default
-    return this.options?.deleteDelay ?? DEFAULT_DELETE_DELAY;
-  }
-
-  /**
-   * Finds the oldest message date by binary searching through time.
-   * Discord search returns newest first, so we use max_id constraints to find oldest.
-   *
-   * @returns The date of the oldest message, or null if no messages found
-   */
-  private async findOldestMessageDate(): Promise<Date | null> {
+  private classifyExclusion(message: DiscordMessage): MessageOutcome | null {
     const opts = this.options;
     if (!opts) return null;
 
-    // Report status to UI
-    this.state.status = 'Finding oldest message...';
-    this.reportProgress();
+    if (message.author?.id !== opts.authorId) {
+      return { status: 'skipped', reason: 'Not authored by current user' };
+    }
+    if (!DELETABLE_MESSAGE_TYPES.has(message.type)) {
+      return { status: 'skipped', reason: `Message type ${message.type} cannot be deleted` };
+    }
+    if (opts.channelId && !opts.guildId && message.channel_id !== opts.channelId) {
+      return { status: 'skipped', reason: 'Message is in a thread' };
+    }
+    if (message.pinned && !opts.includePinned) {
+      return { status: 'skipped', reason: 'Pinned message' };
+    }
+    if (this.compiledPattern && !safeRegexTest(this.compiledPattern, message.content)) {
+      return { status: 'skipped', reason: 'Content does not match pattern' };
+    }
+    return null;
+  }
 
-    // Start with a search to get the newest message date AND total count
-    // We do this directly (not via searchWithConstraints) to capture total_results
-    const searchParams: Parameters<typeof this.apiClient.searchMessages>[0] = {
+  /** Applies an outcome to the counters and reports it. */
+  private recordOutcome(message: DiscordMessage, outcome: MessageOutcome): void {
+    if (outcome.status === 'deleted') {
+      this.state.deletedCount++;
+      this.lastProcessedId = message.id;
+    } else if (outcome.status === 'already_gone') {
+      this.state.alreadyGoneCount++;
+      this.lastProcessedId = message.id;
+    } else if (outcome.status === 'skipped') {
+      this.state.skippedCount++;
+    } else {
+      this.state.failedCount++;
+    }
+
+    if (outcome.status === 'deleted' && shouldSaveProgress(this.state.deletedCount)) {
+      this.persistProgress();
+    }
+
+    this.updateEstimatedTime();
+    this.callbacks.onProgress?.(this.getState(), this.getStats(), message, outcome);
+  }
+
+  // =========================================================================
+  // Private - API access
+  // =========================================================================
+
+  /** Builds search parameters, merging a loop range with the user's filters. */
+  private buildSearchParams(range: SearchRange): SearchParams {
+    const opts = this.options;
+    if (!opts) {
+      throw new Error('Engine not configured');
+    }
+
+    const params: SearchParams = {
       channelId: opts.channelId,
       authorId: opts.authorId,
       offset: 0,
     };
-    if (opts.guildId !== undefined) searchParams.guildId = opts.guildId;
-    if (opts.content !== undefined) searchParams.content = opts.content;
-    if (opts.hasLink !== undefined) searchParams.hasLink = opts.hasLink;
-    if (opts.hasFile !== undefined) searchParams.hasFile = opts.hasFile;
-    if (opts.minId !== undefined) searchParams.minId = opts.minId;
-    if (opts.maxId !== undefined) searchParams.maxId = opts.maxId;
+    if (opts.guildId !== undefined) params.guildId = opts.guildId;
+    if (opts.content !== undefined) params.content = opts.content;
+    if (opts.hasLink !== undefined) params.hasLink = opts.hasLink;
+    if (opts.hasFile !== undefined) params.hasFile = opts.hasFile;
+    if (opts.includePinned !== undefined) params.includePinned = opts.includePinned;
 
-    const initialResponse = await this.apiClient.searchMessages(searchParams);
+    const minId = maxSnowflake(range.minId, opts.minId);
+    const maxId = minSnowflake(range.maxId, opts.maxId);
+    if (minId !== undefined) params.minId = minId;
+    if (maxId !== undefined) params.maxId = maxId;
 
-    // Set total found from initial search
-    const totalResults = initialResponse.total_results ?? 0;
-    if (this.state.initialTotalFound === 0) {
-      this.state.initialTotalFound = totalResults;
-    }
-    this.state.totalFound = totalResults;
-
-    const newestMessage = initialResponse.messages[0]?.[0];
-    if (!newestMessage) return null;
-
-    const newestDate = snowflakeToDate(newestMessage.id);
-
-    // Binary search to find the oldest message
-    // Start from Discord's epoch (2015-01-01) to the newest message
-    const discordEpoch = new Date('2015-01-01T00:00:00.000Z');
-    let lowDate = discordEpoch;
-    let highDate = newestDate;
-    let oldestFound: Date | null = null;
-
-    // Use larger time steps initially for efficiency
-    const maxIterations = 20;
-    let iterations = 0;
-
-    while (
-      iterations < maxIterations &&
-      highDate.getTime() - lowDate.getTime() > TIME_WINDOW_SIZE_MS
-    ) {
-      iterations++;
-
-      // Update status with progress
-      this.state.status = `Finding oldest message... (step ${iterations}/${maxIterations})`;
-      this.reportProgress();
-
-      const midDate = new Date((lowDate.getTime() + highDate.getTime()) / 2);
-      const maxId = dateToSnowflake(midDate);
-
-      // Search for messages before midDate
-      const results = await this.searchWithConstraints(undefined, maxId);
-      await this.delay(this.getSearchDelay());
-
-      const oldestInBatch = results[results.length - 1];
-      if (oldestInBatch) {
-        // Found messages before midDate, so oldest is earlier
-        // Track the oldest we've found so far
-        oldestFound = snowflakeToDate(oldestInBatch.id);
-        highDate = midDate;
-      } else {
-        // No messages before midDate, so oldest is later
-        lowDate = midDate;
-      }
-    }
-
-    // Do a final search in the narrowed range to get the actual oldest
-    if (oldestFound === null) {
-      // We didn't find anything in binary search, use the newest as oldest
-      oldestFound = newestDate;
-    }
-
-    // Clear status before returning
-    this.state.status = undefined;
-
-    return oldestFound;
+    return params;
   }
 
   /**
-   * Searches for messages with optional min_id/max_id constraints.
-   * Used for finding oldest message and window-based deletion.
+   * Searches with the full retry policy.
+   *
+   * Unrecoverable failures (401, 403, exhausted backoff) propagate and abort
+   * the run; they are never swallowed.
+   *
+   * @param range - Snowflake range for this page
+   * @param trackTotals - Whether the response updates the run totals
    */
-  private async searchWithConstraints(
+  private async searchWithRetry(range: SearchRange, trackTotals = true): Promise<DiscordMessage[]> {
+    const budget: RetryBudget = { backoff: 0, indexing: 0, rateLimits: 0 };
+
+    while (!this.stopRequested) {
+      try {
+        const params = this.buildSearchParams(range);
+        await this.respectRateLimitHeader();
+        const started = Date.now();
+        const response = await this.apiClient.searchMessages(params);
+        this.recordPing(Date.now() - started);
+        this.setStatus(undefined);
+        if (trackTotals) {
+          this.recordTotals(response);
+        }
+        return extractHits(response);
+      } catch (error) {
+        await this.handleSearchFailure(error, budget);
+      }
+    }
+    return [];
+  }
+
+  /**
+   * Searches a bounded range. Kept as a named entry point for the oldest-first
+   * path; it shares the retry and abort policy of every other search.
+   */
+  private searchWithConstraints(
     minId: string | undefined,
     maxId: string | undefined,
+    trackTotals = true,
   ): Promise<DiscordMessage[]> {
-    const opts = this.options;
-    if (!opts) return [];
+    const range: SearchRange = {};
+    if (minId !== undefined) range.minId = minId;
+    if (maxId !== undefined) range.maxId = maxId;
+    return this.searchWithRetry(range, trackTotals);
+  }
 
-    const searchParams: Parameters<typeof this.apiClient.searchMessages>[0] = {
-      channelId: opts.channelId,
-      authorId: opts.authorId,
-      offset: 0,
-    };
-
-    if (opts.guildId !== undefined) searchParams.guildId = opts.guildId;
-    if (opts.content !== undefined) searchParams.content = opts.content;
-    if (opts.hasLink !== undefined) searchParams.hasLink = opts.hasLink;
-    if (opts.hasFile !== undefined) searchParams.hasFile = opts.hasFile;
-    if (opts.includePinned !== undefined) searchParams.includePinned = opts.includePinned;
-
-    // Apply window constraints, but also respect user's date filters
-    if (minId !== undefined) {
-      // Use the later of window minId and user's minId
-      if (opts.minId !== undefined) {
-        searchParams.minId = BigInt(minId) > BigInt(opts.minId) ? minId : opts.minId;
-      } else {
-        searchParams.minId = minId;
-      }
-    } else if (opts.minId !== undefined) {
-      searchParams.minId = opts.minId;
+  /** Waits out a recoverable search failure, or rethrows an unrecoverable one. */
+  private async handleSearchFailure(error: unknown, budget: RetryBudget): Promise<void> {
+    if (!DiscordApiError.is(error)) {
+      throw error;
     }
+    const maxRetries = this.getMaxRetries();
 
-    if (maxId !== undefined) {
-      // Use the earlier of window maxId and user's maxId
-      if (opts.maxId !== undefined) {
-        searchParams.maxId = BigInt(maxId) < BigInt(opts.maxId) ? maxId : opts.maxId;
-      } else {
-        searchParams.maxId = maxId;
-      }
-    } else if (opts.maxId !== undefined) {
-      searchParams.maxId = opts.maxId;
-    }
-
-    try {
-      const response = await this.apiClient.searchMessages(searchParams);
-      return response.messages
-        .map((group) => group[0])
-        .filter((msg): msg is DiscordMessage => msg !== undefined);
-    } catch {
-      return [];
+    switch (error.code) {
+      case 'RATE_LIMITED':
+        budget.rateLimits++;
+        if (budget.rateLimits > MAX_CONSECUTIVE_RATE_LIMITS) throw error;
+        await this.waitForRateLimit(error);
+        return;
+      case 'INDEXING':
+        budget.indexing++;
+        if (budget.indexing > maxRetries * INDEXING_RETRY_MULTIPLIER) throw error;
+        this.setStatus(INDEXING_STATUS);
+        await this.delay(this.getSearchDelay());
+        return;
+      case 'NETWORK_ERROR':
+      case 'SERVER_ERROR':
+        budget.backoff++;
+        if (budget.backoff > maxRetries) throw error;
+        await this.delay(backoffDelayMs(budget.backoff));
+        return;
+      default:
+        throw error;
     }
   }
 
+  /** Deletes one message with the full retry policy. */
+  private async deleteWithRetry(message: DiscordMessage): Promise<MessageOutcome> {
+    const budget: RetryBudget = { backoff: 0, indexing: 0, rateLimits: 0 };
+
+    while (!this.stopRequested) {
+      try {
+        await this.respectRateLimitHeader();
+        const started = Date.now();
+        const result = await this.apiClient.deleteMessage(message.channel_id, message.id);
+        this.recordPing(Date.now() - started);
+        if (result === 'already_gone') {
+          return { status: 'already_gone' };
+        }
+        this.handleSuccessfulDeletion();
+        return { status: 'deleted' };
+      } catch (error) {
+        const outcome = await this.handleDeleteFailure(error, budget);
+        if (outcome) {
+          return outcome;
+        }
+      }
+    }
+    return { status: 'skipped', reason: 'Stopped before deletion' };
+  }
+
   /**
-   * Generates time windows from oldest to newest date.
-   * Each window is TIME_WINDOW_SIZE_MS wide.
+   * Decides what a failed delete means.
    *
-   * @param oldestDate - The oldest message date
-   * @param newestDate - The newest message date (defaults to now)
-   * @returns Array of {minId, maxId} pairs representing time windows
+   * @returns A terminal outcome, or null when the delete should be retried
+   * @throws The original error when the run must abort (401, non-API errors)
+   */
+  private async handleDeleteFailure(
+    error: unknown,
+    budget: RetryBudget,
+  ): Promise<MessageOutcome | null> {
+    if (!DiscordApiError.is(error)) {
+      throw error;
+    }
+    if (error.code === 'UNAUTHORIZED') {
+      throw error;
+    }
+
+    switch (error.code) {
+      case 'RATE_LIMITED':
+        budget.rateLimits++;
+        if (budget.rateLimits > MAX_CONSECUTIVE_RATE_LIMITS) return failureOutcome(error);
+        await this.waitForRateLimit(error);
+        return null;
+      case 'NETWORK_ERROR':
+      case 'SERVER_ERROR':
+        budget.backoff++;
+        if (budget.backoff > this.getMaxRetries()) return failureOutcome(error);
+        await this.delay(backoffDelayMs(budget.backoff));
+        return null;
+      case 'FORBIDDEN':
+        return {
+          status: 'skipped',
+          reason: error.isArchivedThread ? 'Archived thread' : error.message || 'Forbidden',
+          code: 'FORBIDDEN',
+        };
+      case 'NOT_FOUND':
+        return { status: 'already_gone', code: 'NOT_FOUND' };
+      default:
+        return failureOutcome(error);
+    }
+  }
+
+  /** Records a 429, smooths the delete delay, and waits it out. */
+  private async waitForRateLimit(error: DiscordApiError): Promise<void> {
+    const waitMs = rateLimitWaitMs(error);
+    this.stats.throttledCount++;
+    this.stats.throttledTime += waitMs;
+    this.handleRateLimit(waitMs);
+    await this.delay(waitMs);
+  }
+
+  /** Waits out an exhausted bucket before spending another request on it. */
+  private async respectRateLimitHeader(): Promise<void> {
+    const info = this.apiClient.getRateLimitInfo();
+    if (!info || info.remaining !== 0) {
+      return;
+    }
+    const resetAfter = info.resetAfter;
+    if (!Number.isFinite(resetAfter) || resetAfter <= 0) {
+      return;
+    }
+    await this.delay(Math.min(resetAfter * 1000, MAX_HEADER_WAIT_MS));
+  }
+
+  /** Updates the run totals from a search response. */
+  private recordTotals(response: SearchResponse): void {
+    const total = response.total_results ?? 0;
+    this.state.totalFound = total;
+    if (!this.totalsInitialised) {
+      this.state.initialTotalFound = total;
+      this.totalsInitialised = true;
+    }
+  }
+
+  // =========================================================================
+  // Private - oldest-first discovery
+  // =========================================================================
+
+  /** Finds the oldest and newest matching message dates. */
+  private async findMessageBounds(): Promise<{ oldest: Date; newest: Date } | null> {
+    this.setStatus('Finding oldest message…');
+    const firstPage = await this.searchWithConstraints(undefined, undefined);
+    const newestMessage = firstPage[0];
+    if (!newestMessage || this.stopRequested) {
+      this.setStatus(undefined);
+      return null;
+    }
+
+    const newest = snowflakeToDate(newestMessage.id);
+    const oldest = await this.bisectOldestDate(newest);
+    this.setStatus(undefined);
+    return { oldest, newest };
+  }
+
+  /**
+   * Bisects the timeline for a lower bound on the oldest matching message.
+   *
+   * A search page holds at most 25 results, so the oldest message *on a page*
+   * is not the oldest message overall. Only the lower bound is sound: `low`
+   * advances solely when a search proved nothing exists at or before it.
+   */
+  private async bisectOldestDate(newestDate: Date): Promise<Date> {
+    let low = new Date(DISCORD_EPOCH_ISO);
+    let high = newestDate;
+
+    for (let step = 1; step <= MAX_BISECTION_STEPS; step++) {
+      if (this.stopRequested) break;
+      if (high.getTime() - low.getTime() <= TIME_WINDOW_SIZE_MS) break;
+      await this.waitWhilePaused();
+      this.setStatus(`Finding oldest message… (step ${step}/${MAX_BISECTION_STEPS})`);
+
+      const mid = new Date((low.getTime() + high.getTime()) / 2);
+      const results = await this.searchWithConstraints(undefined, dateToSnowflake(mid), false);
+      if (this.stopRequested) break;
+
+      if (results.length > 0) {
+        high = mid;
+      } else {
+        low = mid;
+      }
+      await this.delay(this.getSearchDelay());
+    }
+
+    return low;
+  }
+
+  /**
+   * Splits the span between two dates into week-long windows.
+   *
+   * The upper bound is the newest matching message, not `Date.now()`, so a run
+   * never grinds through empty windows up to the present.
    */
   private generateTimeWindows(
     oldestDate: Date,
-    newestDate: Date = new Date(),
+    newestDate: Date,
   ): Array<{ minId: string; maxId: string }> {
     const windows: Array<{ minId: string; maxId: string }> = [];
-
+    const endTime = newestDate.getTime() + 1;
     let windowStart = oldestDate.getTime();
-    const endTime = newestDate.getTime();
 
     while (windowStart < endTime) {
-      const windowEnd = Math.min(windowStart + TIME_WINDOW_SIZE_MS, endTime + 1);
-
+      const windowEnd = Math.min(windowStart + TIME_WINDOW_SIZE_MS, endTime);
       windows.push({
         minId: dateToSnowflake(new Date(windowStart)),
         maxId: dateToSnowflake(new Date(windowEnd)),
       });
-
       windowStart = windowEnd;
     }
 
     return windows;
   }
 
-  /**
-   * Delays execution for the specified time.
-   */
-  private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  // =========================================================================
+  // Private - rate limit smoothing
+  // =========================================================================
+
+  /** Eases the delete delay back toward baseline after a run of successes. */
+  private handleSuccessfulDeletion(): void {
+    if (!this.isThrottled) {
+      return;
+    }
+    this.consecutiveSuccesses++;
+    if (this.consecutiveSuccesses < THROTTLE_RECOVERY_THRESHOLD) {
+      return;
+    }
+
+    const gap = this.currentDelay - this.baselineDelay;
+    this.currentDelay = Math.max(
+      this.baselineDelay,
+      this.currentDelay - gap * THROTTLE_RECOVERY_PERCENTAGE,
+    );
+    this.consecutiveSuccesses = 0;
+
+    if (this.currentDelay <= this.baselineDelay) {
+      this.currentDelay = this.baselineDelay;
+      this.isThrottled = false;
+    }
+
+    this.callbacks.onRateLimitChange?.({
+      isThrottled: this.isThrottled,
+      currentDelay: this.currentDelay,
+    });
+  }
+
+  /** Raises the delete delay partway toward the reported `retry_after`. */
+  private handleRateLimit(retryAfterMs: number): void {
+    this.isThrottled = true;
+    this.consecutiveSuccesses = 0;
+
+    const gap = retryAfterMs - this.currentDelay;
+    if (gap > 0) {
+      this.currentDelay = this.currentDelay + gap * THROTTLE_INCREASE_PERCENTAGE;
+    }
+
+    this.callbacks.onRateLimitChange?.({
+      isThrottled: this.isThrottled,
+      currentDelay: this.currentDelay,
+    });
+  }
+
+  // =========================================================================
+  // Private - bookkeeping
+  // =========================================================================
+
+  /** Records a request round trip for the rolling average. */
+  private recordPing(ping: number): void {
+    this.pingHistory.push(ping);
+    if (this.pingHistory.length > 20) {
+      this.pingHistory.shift();
+    }
+    const sum = this.pingHistory.reduce((a, b) => a + b, 0);
+    this.stats.averagePing = Math.round(sum / this.pingHistory.length);
+  }
+
+  /** Recomputes the estimate from everything processed so far. */
+  private updateEstimatedTime(): void {
+    const processed =
+      this.state.deletedCount +
+      this.state.failedCount +
+      this.state.skippedCount +
+      this.state.alreadyGoneCount;
+
+    if (this.state.initialTotalFound === 0 || processed === 0) {
+      this.stats.estimatedTimeRemaining = -1;
+      return;
+    }
+
+    const elapsed = Date.now() - this.stats.startTime;
+    const remaining = Math.max(0, this.state.initialTotalFound - processed);
+    this.stats.estimatedTimeRemaining = Math.round((elapsed / processed) * remaining);
+  }
+
+  /** Publishes a status message to the UI. */
+  private setStatus(status: string | undefined): void {
+    if (this.state.status === status) {
+      return;
+    }
+    this.state.status = status;
+    this.callbacks.onStatus?.(status);
+  }
+
+  /** Blocks while the engine is paused. */
+  private async waitWhilePaused(): Promise<void> {
+    while (this.state.paused && this.pausePromise && !this.stopRequested) {
+      await this.pausePromise;
+    }
+  }
+
+  /** Configured search delay. */
+  private getSearchDelay(): number {
+    return this.options?.searchDelay ?? DEFAULT_SEARCH_DELAY;
+  }
+
+  /** Current delete delay, honouring rate limit smoothing. */
+  private getDeleteDelay(): number {
+    if (this.isThrottled) {
+      return this.currentDelay;
+    }
+    return this.options?.deleteDelay ?? DEFAULT_DELETE_DELAY;
+  }
+
+  /** Configured retry budget. */
+  private getMaxRetries(): number {
+    return this.options?.maxRetries ?? DEFAULT_MAX_RETRIES;
   }
 
   /**
-   * Reports status changes to the UI via callback.
+   * Waits, unless the run is stopped first.
+   *
+   * The wait is tied to the run's `AbortController`, so `stop()` ends it
+   * immediately instead of leaving the engine parked on a ten-second timer.
    */
-  private reportProgress(): void {
-    this.callbacks.onStatus?.(this.state.status);
+  private delay(ms: number): Promise<void> {
+    if (this.stopRequested || ms <= 0) {
+      return Promise.resolve();
+    }
+    const signal = this.abortController?.signal;
+    if (signal?.aborted) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, ms);
+      signal?.addEventListener('abort', finish, { once: true });
+    });
   }
+}
+
+// =============================================================================
+// Factory helpers
+// =============================================================================
+
+/** Compiles and validates a user-supplied pattern. */
+function compilePattern(pattern: string): RegExp | null {
+  if (!pattern) {
+    return null;
+  }
+  const result = validateRegex(pattern, 'i');
+  if (!result.valid) {
+    throw new Error(`Invalid regex pattern: ${result.error}`);
+  }
+  return result.regex ?? null;
+}
+
+/** A fresh engine state. */
+function createInitialState(): DeletionEngineState {
+  return {
+    running: false,
+    paused: false,
+    deletedCount: 0,
+    failedCount: 0,
+    skippedCount: 0,
+    alreadyGoneCount: 0,
+    totalFound: 0,
+    initialTotalFound: 0,
+    currentOffset: 0,
+  };
+}
+
+/** A fresh statistics record. */
+function createInitialStats(): DeletionEngineStats {
+  return {
+    startTime: 0,
+    throttledCount: 0,
+    throttledTime: 0,
+    averagePing: 0,
+    estimatedTimeRemaining: -1,
+  };
 }

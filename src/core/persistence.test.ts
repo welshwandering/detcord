@@ -1,582 +1,381 @@
 /**
- * Tests for persistence module
+ * Tests for the v2 session persistence layer.
+ *
+ * Every test drives persistence through a mocked `getPageStorage()` backed by
+ * an in-memory `Storage`, because Discord deletes `window.localStorage` and the
+ * real module must never touch it directly.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const storageState = {
+  current: null as Storage | null,
+};
+
+vi.mock('./storage', () => ({
+  getPageStorage: (): Storage | null => storageState.current,
+  resetPageStorage: (): void => {
+    storageState.current = null;
+  },
+}));
+
 import {
   clearProgress,
+  findResumableSession,
   getDeletionsUntilSave,
-  hasExistingSession,
+  isValidProgressData,
   loadProgress,
   type SavedProgress,
   saveProgress,
   shouldSaveProgress,
+  targetKeyFor,
 } from './persistence';
 
+// =============================================================================
+// Helpers
+// =============================================================================
+
+/** Minimal in-memory Storage implementation with the indexed key API. */
+function createMemoryStorage(): Storage {
+  const map = new Map<string, string>();
+  return {
+    get length(): number {
+      return map.size;
+    },
+    clear(): void {
+      map.clear();
+    },
+    getItem(key: string): string | null {
+      return map.has(key) ? (map.get(key) as string) : null;
+    },
+    key(index: number): string | null {
+      return [...map.keys()][index] ?? null;
+    },
+    removeItem(key: string): void {
+      map.delete(key);
+    },
+    setItem(key: string, value: string): void {
+      map.set(key, value);
+    },
+  } as Storage;
+}
+
+/** Overrides for {@link createProgress}; optional fields may be cleared. */
+type ProgressOverrides = Partial<Omit<SavedProgress, 'guildId' | 'channelId'>> & {
+  guildId?: string | undefined;
+  channelId?: string | undefined;
+};
+
+function createProgress(overrides: ProgressOverrides = {}): SavedProgress {
+  const merged: Record<string, unknown> = {
+    version: 2,
+    runId: 'run-1',
+    authorId: '111111111111111111',
+    guildId: '222222222222222222',
+    deletionOrder: 'newest',
+    cursor: { maxId: '333333333333333333' },
+    deletedCount: 10,
+    failedCount: 1,
+    skippedCount: 2,
+    alreadyGoneCount: 3,
+    totalFound: 100,
+    initialTotalFound: 120,
+    timestamp: Date.now(),
+    ...overrides,
+  };
+  for (const key of Object.keys(merged)) {
+    if (merged[key] === undefined) {
+      delete merged[key];
+    }
+  }
+  return merged as unknown as SavedProgress;
+}
+
+const AUTHOR = '111111111111111111';
+const GUILD_KEY = 'g:222222222222222222';
+
+// =============================================================================
+// Tests
+// =============================================================================
+
 describe('persistence', () => {
-  // Mock localStorage
-  const localStorageMock = (() => {
-    let store: Record<string, string> = {};
-    return {
-      getItem: vi.fn((key: string) => store[key] ?? null),
-      setItem: vi.fn((key: string, value: string) => {
-        store[key] = value;
-      }),
-      removeItem: vi.fn((key: string) => {
-        delete store[key];
-      }),
-      clear: vi.fn(() => {
-        store = {};
-      }),
-      get length() {
-        return Object.keys(store).length;
-      },
-      key: vi.fn((index: number) => Object.keys(store)[index] ?? null),
-    };
-  })();
+  let storage: Storage;
 
   beforeEach(() => {
-    // Reset localStorage mock before each test
-    localStorageMock.clear();
-    vi.clearAllMocks();
-    Object.defineProperty(globalThis, 'localStorage', {
-      value: localStorageMock,
-      writable: true,
+    storage = createMemoryStorage();
+    storageState.current = storage;
+  });
+
+  describe('targetKeyFor', () => {
+    it('prefers the guild over the channel', () => {
+      expect(targetKeyFor({ guildId: 'g1', channelId: 'c1' })).toBe('g:g1');
+    });
+
+    it('falls back to the channel', () => {
+      expect(targetKeyFor({ channelId: 'c1' })).toBe('c:c1');
+    });
+
+    it('returns a stable key when neither is set', () => {
+      expect(targetKeyFor({})).toBe('all');
     });
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  // Valid snowflakes must be 17-19 digits
-  const VALID_AUTHOR_ID = '12345678901234567';
-  const VALID_MESSAGE_ID = '98765432109876543';
-  const VALID_GUILD_ID = '11111111111111111';
-  const VALID_CHANNEL_ID = '22222222222222222';
-
-  describe('saveProgress / loadProgress round-trip', () => {
-    it('should save and load progress correctly', () => {
-      const progress: SavedProgress = {
-        authorId: VALID_AUTHOR_ID,
-        lastMaxId: VALID_MESSAGE_ID,
-        deletedCount: 50,
-        totalFound: 100,
-        timestamp: Date.now(),
-      };
-
+  describe('saveProgress / loadProgress', () => {
+    it('round-trips a v2 entry under the per-target key', () => {
+      const progress = createProgress();
       saveProgress(progress);
-      const loaded = loadProgress();
 
-      expect(loaded).toEqual(progress);
+      expect(storage.getItem(`detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`)).not.toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY)).toEqual(progress);
     });
 
-    it('should save and load progress with guildId and channelId', () => {
-      const progress: SavedProgress = {
-        guildId: VALID_GUILD_ID,
-        channelId: VALID_CHANNEL_ID,
-        authorId: VALID_AUTHOR_ID,
-        lastMaxId: VALID_MESSAGE_ID,
-        deletedCount: 25,
-        totalFound: 50,
-        timestamp: Date.now(),
-      };
+    it('keeps runs in different targets apart', () => {
+      saveProgress(createProgress());
+      saveProgress(
+        createProgress({
+          runId: 'run-2',
+          guildId: undefined,
+          channelId: '444444444444444444',
+          deletedCount: 99,
+        }),
+      );
 
-      saveProgress(progress);
-      const loaded = loadProgress();
-
-      expect(loaded).toEqual(progress);
+      expect(loadProgress(AUTHOR, GUILD_KEY)?.deletedCount).toBe(10);
+      expect(loadProgress(AUTHOR, 'c:444444444444444444')?.deletedCount).toBe(99);
     });
 
-    it('should save and load progress with filters', () => {
-      const progress: SavedProgress = {
-        authorId: VALID_AUTHOR_ID,
-        lastMaxId: VALID_MESSAGE_ID,
-        deletedCount: 10,
-        totalFound: 20,
-        timestamp: Date.now(),
-        filters: {
-          content: 'test',
-          hasLink: true,
-          hasFile: false,
-          includePinned: true,
-          pattern: 'foo.*bar',
-          minId: '00000000000000001',
+    it('returns null when nothing is stored', () => {
+      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+    });
+
+    it('returns null and does not throw when no storage is available', () => {
+      storageState.current = null;
+      expect(() => saveProgress(createProgress())).not.toThrow();
+      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(findResumableSession(AUTHOR)).toBeNull();
+      expect(() => clearProgress(AUTHOR, GUILD_KEY)).not.toThrow();
+    });
+
+    it('swallows storage write failures', () => {
+      storageState.current = {
+        ...storage,
+        getItem: () => null,
+        setItem: () => {
+          throw new Error('QuotaExceeded');
         },
-      };
+      } as unknown as Storage;
 
-      saveProgress(progress);
-      const loaded = loadProgress();
+      expect(() => saveProgress(createProgress())).not.toThrow();
+    });
 
-      expect(loaded).toEqual(progress);
-      expect(loaded?.filters).toEqual(progress.filters);
+    it('removes an entry with invalid JSON', () => {
+      const key = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`;
+      storage.setItem(key, '{not json');
+
+      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(storage.getItem(key)).toBeNull();
+    });
+
+    it('removes an entry that fails schema validation', () => {
+      const key = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`;
+      storage.setItem(key, JSON.stringify({ version: 2, authorId: AUTHOR }));
+
+      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(storage.getItem(key)).toBeNull();
+    });
+
+    it('removes an entry older than 24 hours', () => {
+      const key = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`;
+      saveProgress(createProgress({ timestamp: Date.now() - 25 * 60 * 60 * 1000 }));
+
+      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(storage.getItem(key)).toBeNull();
+    });
+
+    it('keeps an entry just inside the expiry window', () => {
+      saveProgress(createProgress({ timestamp: Date.now() - 23 * 60 * 60 * 1000 }));
+      expect(loadProgress(AUTHOR, GUILD_KEY)).not.toBeNull();
+    });
+
+    it('returns null when the storage read throws', () => {
+      storageState.current = {
+        ...storage,
+        getItem: () => {
+          throw new Error('blocked');
+        },
+      } as unknown as Storage;
+
+      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+    });
+  });
+
+  describe('legacy v1 entries', () => {
+    it('removes the legacy key on save', () => {
+      storage.setItem('detcord_progress', JSON.stringify({ lastMaxId: '1', deletedCount: 3 }));
+      saveProgress(createProgress());
+      expect(storage.getItem('detcord_progress')).toBeNull();
+    });
+
+    it('removes the legacy key on load', () => {
+      storage.setItem('detcord_progress', '{}');
+      loadProgress(AUTHOR, GUILD_KEY);
+      expect(storage.getItem('detcord_progress')).toBeNull();
+    });
+
+    it('removes the legacy key when scanning for resumable sessions', () => {
+      storage.setItem('detcord_progress', '{}');
+      findResumableSession(AUTHOR);
+      expect(storage.getItem('detcord_progress')).toBeNull();
+    });
+
+    it('never resumes from a v1 payload', () => {
+      storage.setItem(
+        `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`,
+        JSON.stringify({
+          authorId: AUTHOR,
+          lastMaxId: '1',
+          deletedCount: 3,
+          timestamp: Date.now(),
+        }),
+      );
+      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+    });
+  });
+
+  describe('findResumableSession', () => {
+    it('returns the newest non-expired entry for the author', () => {
+      saveProgress(createProgress({ runId: 'old', timestamp: Date.now() - 60_000 }));
+      saveProgress(
+        createProgress({
+          runId: 'new',
+          guildId: undefined,
+          channelId: '444444444444444444',
+          timestamp: Date.now(),
+        }),
+      );
+
+      expect(findResumableSession(AUTHOR)?.runId).toBe('new');
+    });
+
+    it('ignores entries belonging to another author', () => {
+      saveProgress(createProgress({ authorId: '999999999999999999' }));
+      expect(findResumableSession(AUTHOR)).toBeNull();
+    });
+
+    it('skips and removes expired entries while scanning', () => {
+      saveProgress(createProgress({ timestamp: Date.now() - 48 * 60 * 60 * 1000 }));
+      expect(findResumableSession(AUTHOR)).toBeNull();
+      expect(storage.getItem(`detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`)).toBeNull();
+    });
+
+    it('returns null when key enumeration throws', () => {
+      saveProgress(createProgress());
+      const broken = {
+        ...storage,
+        getItem: (key: string) => storage.getItem(key),
+        removeItem: (key: string) => storage.removeItem(key),
+        key: () => {
+          throw new Error('blocked');
+        },
+        get length(): number {
+          return 1;
+        },
+      } as unknown as Storage;
+      storageState.current = broken;
+
+      expect(findResumableSession(AUTHOR)).toBeNull();
     });
   });
 
   describe('clearProgress', () => {
-    it('should remove saved progress from localStorage', () => {
-      const progress: SavedProgress = {
-        authorId: VALID_AUTHOR_ID,
-        lastMaxId: VALID_MESSAGE_ID,
-        deletedCount: 10,
-        totalFound: 20,
-        timestamp: Date.now(),
-      };
+    it('removes only the targeted entry', () => {
+      saveProgress(createProgress());
+      saveProgress(
+        createProgress({ guildId: undefined, channelId: '444444444444444444', runId: 'keep' }),
+      );
 
-      saveProgress(progress);
-      expect(loadProgress()).not.toBeNull();
+      clearProgress(AUTHOR, GUILD_KEY);
 
-      clearProgress();
-      expect(loadProgress()).toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(loadProgress(AUTHOR, 'c:444444444444444444')?.runId).toBe('keep');
     });
 
-    it('should not throw when localStorage is empty', () => {
-      expect(() => clearProgress()).not.toThrow();
-    });
-  });
+    it('swallows removal failures', () => {
+      storageState.current = {
+        ...storage,
+        getItem: () => null,
+        removeItem: () => {
+          throw new Error('blocked');
+        },
+      } as unknown as Storage;
 
-  describe('hasExistingSession', () => {
-    it('should return true when valid session exists', () => {
-      const progress: SavedProgress = {
-        authorId: VALID_AUTHOR_ID,
-        lastMaxId: VALID_MESSAGE_ID,
-        deletedCount: 10,
-        totalFound: 20,
-        timestamp: Date.now(),
-      };
-
-      saveProgress(progress);
-      expect(hasExistingSession()).toBe(true);
-    });
-
-    it('should return false when no session exists', () => {
-      expect(hasExistingSession()).toBe(false);
-    });
-
-    it('should return false when session is expired', () => {
-      const progress: SavedProgress = {
-        authorId: VALID_AUTHOR_ID,
-        lastMaxId: VALID_MESSAGE_ID,
-        deletedCount: 10,
-        totalFound: 20,
-        // 25 hours ago (expired)
-        timestamp: Date.now() - 25 * 60 * 60 * 1000,
-      };
-
-      saveProgress(progress);
-      expect(hasExistingSession()).toBe(false);
+      expect(() => clearProgress(AUTHOR, GUILD_KEY)).not.toThrow();
     });
   });
 
-  describe('24h expiry handling', () => {
-    it('should return null for expired progress', () => {
-      const progress: SavedProgress = {
-        authorId: VALID_AUTHOR_ID,
-        lastMaxId: VALID_MESSAGE_ID,
-        deletedCount: 10,
-        totalFound: 20,
-        // 25 hours ago (expired)
-        timestamp: Date.now() - 25 * 60 * 60 * 1000,
-      };
-
-      saveProgress(progress);
-      const loaded = loadProgress();
-
-      expect(loaded).toBeNull();
+  describe('isValidProgressData', () => {
+    it('accepts a complete v2 entry', () => {
+      expect(isValidProgressData(createProgress())).toBe(true);
     });
 
-    it('should return progress just before expiry', () => {
-      const progress: SavedProgress = {
-        authorId: VALID_AUTHOR_ID,
-        lastMaxId: VALID_MESSAGE_ID,
-        deletedCount: 10,
-        totalFound: 20,
-        // 23 hours ago (not expired)
-        timestamp: Date.now() - 23 * 60 * 60 * 1000,
-      };
-
-      saveProgress(progress);
-      const loaded = loadProgress();
-
-      expect(loaded).not.toBeNull();
-      expect(loaded?.authorId).toBe(progress.authorId);
+    it.each([
+      ['null', null],
+      ['a string', 'nope'],
+      ['a v1 entry', { version: 1, authorId: AUTHOR }],
+      ['a missing runId', { ...createProgress(), runId: '' }],
+      ['a missing authorId', { ...createProgress(), authorId: '' }],
+      ['a bad deletion order', { ...createProgress(), deletionOrder: 'sideways' }],
+      ['a non-string guildId', { ...createProgress(), guildId: 5 }],
+      ['a non-string channelId', { ...createProgress(), channelId: 5 }],
+      ['a missing cursor', { ...createProgress(), cursor: undefined }],
+      ['a non-string cursor maxId', { ...createProgress(), cursor: { maxId: 5 } }],
+      ['a non-string cursor minId', { ...createProgress(), cursor: { minId: 5 } }],
+      ['a non-numeric counter', { ...createProgress(), alreadyGoneCount: 'three' }],
+      ['a non-finite timestamp', { ...createProgress(), timestamp: Number.NaN }],
+      ['a non-object filters', { ...createProgress(), filters: 'nope' }],
+      ['a non-string filter value', { ...createProgress(), filters: { pattern: 5 } }],
+      ['a non-boolean filter value', { ...createProgress(), filters: { hasLink: 'yes' } }],
+    ])('rejects %s', (_label, value) => {
+      expect(isValidProgressData(value)).toBe(false);
     });
 
-    it('should clear expired progress from localStorage', () => {
-      const progress: SavedProgress = {
-        authorId: VALID_AUTHOR_ID,
-        lastMaxId: VALID_MESSAGE_ID,
-        deletedCount: 10,
-        totalFound: 20,
-        // 25 hours ago (expired)
-        timestamp: Date.now() - 25 * 60 * 60 * 1000,
-      };
-
-      saveProgress(progress);
-      loadProgress(); // Should clear expired progress
-
-      // Verify removeItem was called
-      expect(localStorageMock.removeItem).toHaveBeenCalledWith('detcord_progress');
-    });
-  });
-
-  describe('localStorage error handling', () => {
-    it('should handle localStorage.setItem throwing QuotaExceededError', () => {
-      localStorageMock.setItem.mockImplementation(() => {
-        throw new DOMException('Storage quota exceeded', 'QuotaExceededError');
+    it('accepts an entry with valid filters', () => {
+      const progress = createProgress({
+        filters: {
+          content: 'hi',
+          hasLink: true,
+          hasFile: false,
+          includePinned: true,
+          pattern: 'a.*b',
+          minId: '1',
+          maxId: '2',
+        },
       });
-
-      const progress: SavedProgress = {
-        authorId: VALID_AUTHOR_ID,
-        lastMaxId: VALID_MESSAGE_ID,
-        deletedCount: 10,
-        totalFound: 20,
-        timestamp: Date.now(),
-      };
-
-      // Should not throw
-      expect(() => saveProgress(progress)).not.toThrow();
+      expect(isValidProgressData(progress)).toBe(true);
     });
 
-    it('should handle localStorage.getItem throwing', () => {
-      localStorageMock.getItem.mockImplementation(() => {
-        throw new Error('localStorage access denied');
-      });
-
-      // Should not throw, should return null
-      expect(() => loadProgress()).not.toThrow();
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should handle localStorage.removeItem throwing', () => {
-      localStorageMock.removeItem.mockImplementation(() => {
-        throw new Error('localStorage access denied');
-      });
-
-      // Should not throw
-      expect(() => clearProgress()).not.toThrow();
-    });
-
-    it('should handle invalid JSON in localStorage', () => {
-      localStorageMock.getItem.mockReturnValue('not valid json');
-
-      // Should not throw, should return null
-      expect(() => loadProgress()).not.toThrow();
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null for incomplete saved data', () => {
-      // Missing required fields
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: Date.now(),
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when timestamp is not a number', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: '123',
-          lastMaxId: '456',
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: 'not a number',
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when guildId is not a string', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          guildId: 12345, // Should be string
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: Date.now(),
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when guildId is invalid snowflake', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          guildId: 'invalid',
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: Date.now(),
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should accept @me as valid guildId for DMs', () => {
-      const progress = {
-        authorId: VALID_AUTHOR_ID,
-        lastMaxId: VALID_MESSAGE_ID,
-        guildId: '@me',
-        deletedCount: 10,
-        totalFound: 20,
-        timestamp: Date.now(),
-      };
-      localStorageMock.getItem.mockReturnValue(JSON.stringify(progress));
-
-      const loaded = loadProgress();
-      expect(loaded).not.toBeNull();
-      expect(loaded?.guildId).toBe('@me');
-    });
-
-    it('should return null when channelId is not a string', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          channelId: 12345, // Should be string
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: Date.now(),
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when channelId is invalid snowflake', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          channelId: 'invalid',
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: Date.now(),
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when initialTotalFound is not a number', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          deletedCount: 10,
-          totalFound: 20,
-          initialTotalFound: 'not a number',
-          timestamp: Date.now(),
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when filters is not an object', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: Date.now(),
-          filters: 'not an object',
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when filters.content is not a string', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: Date.now(),
-          filters: { content: 123 },
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when filters.hasLink is not a boolean', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: Date.now(),
-          filters: { hasLink: 'yes' },
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when filters.hasFile is not a boolean', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: Date.now(),
-          filters: { hasFile: 1 },
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when filters.includePinned is not a boolean', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: Date.now(),
-          filters: { includePinned: 'true' },
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when filters.pattern is not a string', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: Date.now(),
-          filters: { pattern: /regex/ },
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when filters.minId is not a valid snowflake', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: Date.now(),
-          filters: { minId: 'invalid' },
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when filters is null', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          deletedCount: 10,
-          totalFound: 20,
-          timestamp: Date.now(),
-          filters: null,
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when deletedCount is not finite', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          deletedCount: Number.POSITIVE_INFINITY,
-          totalFound: 20,
-          timestamp: Date.now(),
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
-    });
-
-    it('should return null when totalFound is not finite', () => {
-      localStorageMock.getItem.mockReturnValue(
-        JSON.stringify({
-          authorId: VALID_AUTHOR_ID,
-          lastMaxId: VALID_MESSAGE_ID,
-          deletedCount: 10,
-          totalFound: Number.NaN,
-          timestamp: Date.now(),
-        }),
-      );
-
-      expect(loadProgress()).toBeNull();
+    it('accepts an oldest-first cursor', () => {
+      expect(
+        isValidProgressData(
+          createProgress({ deletionOrder: 'oldest', cursor: { minId: '555555555555555555' } }),
+        ),
+      ).toBe(true);
     });
   });
 
-  describe('getDeletionsUntilSave', () => {
-    it('should return 10 when deletedCount is 0', () => {
-      expect(getDeletionsUntilSave(0)).toBe(10);
-    });
-
-    it('should return 9 when deletedCount is 1', () => {
-      expect(getDeletionsUntilSave(1)).toBe(9);
-    });
-
-    it('should return 1 when deletedCount is 9', () => {
-      expect(getDeletionsUntilSave(9)).toBe(1);
-    });
-
-    it('should return 10 when deletedCount is 10', () => {
-      expect(getDeletionsUntilSave(10)).toBe(10);
-    });
-
-    it('should return 5 when deletedCount is 15', () => {
-      expect(getDeletionsUntilSave(15)).toBe(5);
-    });
-  });
-
-  describe('shouldSaveProgress', () => {
-    it('should return false when deletedCount is 0', () => {
+  describe('save scheduling', () => {
+    it('saves every tenth deletion', () => {
       expect(shouldSaveProgress(0)).toBe(false);
-    });
-
-    it('should return false when deletedCount is 1', () => {
-      expect(shouldSaveProgress(1)).toBe(false);
-    });
-
-    it('should return true when deletedCount is 10', () => {
+      expect(shouldSaveProgress(9)).toBe(false);
       expect(shouldSaveProgress(10)).toBe(true);
-    });
-
-    it('should return true when deletedCount is 20', () => {
       expect(shouldSaveProgress(20)).toBe(true);
+      expect(shouldSaveProgress(21)).toBe(false);
     });
 
-    it('should return false when deletedCount is 15', () => {
-      expect(shouldSaveProgress(15)).toBe(false);
-    });
-
-    it('should return true when deletedCount is 100', () => {
-      expect(shouldSaveProgress(100)).toBe(true);
+    it('reports deletions remaining until the next save', () => {
+      expect(getDeletionsUntilSave(0)).toBe(10);
+      expect(getDeletionsUntilSave(3)).toBe(7);
+      expect(getDeletionsUntilSave(10)).toBe(10);
     });
   });
 });

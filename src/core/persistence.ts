@@ -1,258 +1,405 @@
 /**
- * Persistence module for Detcord
+ * Session persistence for Detcord.
  *
- * Provides localStorage-based persistence for deletion progress,
- * allowing users to resume interrupted deletion sessions.
+ * Discord's web client deletes `window.localStorage` from its own window, so
+ * every direct `localStorage.*` call throws. All access goes through
+ * `getPageStorage()`, which falls back to a same-origin iframe.
+ *
+ * Progress is stored per author and per deletion target so that a run in one
+ * server cannot clobber the saved cursor of a run in another.
  */
 
-import { isValidSnowflake } from '../utils/validators';
+import { getPageStorage } from './storage';
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-/** localStorage key for saved progress */
-const STORAGE_KEY = 'detcord_progress';
+/** Prefix for every v2 progress entry. */
+const KEY_PREFIX = 'detcord_progress:v2:';
 
-/** Expiry time for saved progress in milliseconds (24 hours) */
+/** The v1 key, written by releases before per-target progress existed. */
+const LEGACY_KEY = 'detcord_progress';
+
+/** Expiry for saved progress in milliseconds (24 hours). */
 const PROGRESS_EXPIRY_MS = 24 * 60 * 60 * 1000;
+
+/** Number of deletions between automatic saves. */
+const SAVE_INTERVAL = 10;
+
+/** Current schema version. */
+const SCHEMA_VERSION = 2;
 
 // =============================================================================
 // Types
 // =============================================================================
 
-/**
- * Filter state that can be saved and restored
- */
+/** Filter state carried across a resume. */
 export interface SavedFilters {
-  /** Text content filter */
+  /** Text content filter passed to Discord's search. */
   content?: string;
-  /** Filter for messages containing links */
+  /** Filter for messages containing links. */
   hasLink?: boolean;
-  /** Filter for messages containing file attachments */
+  /** Filter for messages containing file attachments. */
   hasFile?: boolean;
-  /** Whether to include pinned messages */
+  /** Whether pinned messages were included. */
   includePinned?: boolean;
-  /** Regex pattern for content matching */
+  /** Client-side regex pattern. */
   pattern?: string;
-  /** Minimum message ID (for "after" date filter) */
+  /** Minimum message ID ("after" date filter). */
   minId?: string;
+  /** Maximum message ID ("before" date filter). */
+  maxId?: string;
 }
 
-/**
- * Saved progress state for resuming deletion sessions
- */
+/** Saved progress for one deletion run. */
 export interface SavedProgress {
-  /** Guild (server) ID - optional, for server-wide search */
-  guildId?: string;
-  /** Channel ID */
-  channelId?: string;
-  /** ID of the message author (user) */
+  /** Schema version; always 2 for entries written by this module. */
+  version: 2;
+  /** Identifier for the run, so a resumed run can be correlated in logs. */
+  runId: string;
+  /** ID of the message author (the current user). */
   authorId: string;
-  /** Last maximum message ID processed (for pagination) */
-  lastMaxId: string;
-  /** Number of messages successfully deleted */
+  /** Guild (server) ID for a server-wide run. */
+  guildId?: string;
+  /** Channel ID for a channel-specific run. */
+  channelId?: string;
+  /** Direction the run was deleting in. */
+  deletionOrder: 'newest' | 'oldest';
+  /**
+   * Where to pick the run back up.
+   *
+   * Newest-first runs store `maxId` (search strictly older than this next).
+   * Oldest-first runs store `minId` (search strictly newer than this next).
+   */
+  cursor: { maxId?: string; minId?: string };
+  /** Messages successfully deleted. */
   deletedCount: number;
-  /** Total number of messages found matching filters (current) */
+  /** Messages that failed to delete. */
+  failedCount: number;
+  /** Messages skipped (pinned, foreign, undeletable type, forbidden). */
+  skippedCount: number;
+  /** Messages that were already gone when the delete was attempted. */
+  alreadyGoneCount: number;
+  /** Latest `total_results` reported by search. */
   totalFound: number;
-  /** Initial total found on first search (for progress calculation) - optional for backward compatibility */
-  initialTotalFound?: number;
-  /** Timestamp when progress was saved */
+  /** `total_results` of the first search of the run. */
+  initialTotalFound: number;
+  /** Epoch milliseconds when the entry was written. */
   timestamp: number;
-  /** Filter state at time of save */
+  /** Filter state at the time of the save. */
   filters?: SavedFilters;
 }
 
 // =============================================================================
-// Functions
+// Key helpers
 // =============================================================================
 
 /**
- * Saves deletion progress to localStorage.
+ * Builds the target portion of a storage key.
  *
- * @param progress - The progress state to save
- * @throws Never throws - handles localStorage errors gracefully
+ * A guild ID wins over a channel ID because a guild-wide search ignores the
+ * channel, and the two runs must not share a cursor.
+ *
+ * @param opts - The guild and/or channel the run targets
+ * @returns `g:<guildId>`, `c:<channelId>`, or `all` when neither is set
  */
-export function saveProgress(progress: SavedProgress): void {
+export function targetKeyFor(opts: { guildId?: string; channelId?: string }): string {
+  if (opts.guildId) {
+    return `g:${opts.guildId}`;
+  }
+  if (opts.channelId) {
+    return `c:${opts.channelId}`;
+  }
+  return 'all';
+}
+
+/** Builds the full storage key for an author/target pair. */
+function storageKey(authorId: string, targetKey: string): string {
+  return `${KEY_PREFIX}${authorId}:${targetKey}`;
+}
+
+/** Removes the v1 entry if it is still present. */
+function removeLegacyEntry(storage: Storage): void {
   try {
-    const data = JSON.stringify(progress);
-    localStorage.setItem(STORAGE_KEY, data);
+    if (storage.getItem(LEGACY_KEY) !== null) {
+      storage.removeItem(LEGACY_KEY);
+    }
   } catch {
-    // Handle localStorage quota errors or other storage failures gracefully
-    // In a userscript context, we can't do much more than silently fail
-    // The deletion will continue, just without the ability to resume
+    // A storage that refuses reads cannot hold a legacy entry we care about.
   }
 }
 
-/**
- * Validates the structure of loaded progress data.
- * Performs runtime type checking to ensure data integrity.
- *
- * @param data - The parsed data to validate
- * @returns True if the data has valid structure
- */
-function isValidProgressData(data: unknown): data is SavedProgress {
-  if (!data || typeof data !== 'object') {
+// =============================================================================
+// Validation
+// =============================================================================
+
+/** Checks that every value in an array is a finite number. */
+function allFiniteNumbers(values: unknown[]): boolean {
+  return values.every((value) => typeof value === 'number' && Number.isFinite(value));
+}
+
+/** Validates the optional `filters` object of a saved entry. */
+function isValidFilters(value: unknown): value is SavedFilters {
+  if (typeof value !== 'object' || value === null) {
     return false;
   }
+  const filters = value as Record<string, unknown>;
+  const strings = ['content', 'pattern', 'minId', 'maxId'] as const;
+  const booleans = ['hasLink', 'hasFile', 'includePinned'] as const;
 
-  const obj = data as Record<string, unknown>;
+  for (const key of strings) {
+    if (filters[key] !== undefined && typeof filters[key] !== 'string') {
+      return false;
+    }
+  }
+  for (const key of booleans) {
+    if (filters[key] !== undefined && typeof filters[key] !== 'boolean') {
+      return false;
+    }
+  }
+  return true;
+}
 
-  // Validate required string fields
-  if (typeof obj.authorId !== 'string' || !isValidSnowflake(obj.authorId)) {
+/** Validates the `cursor` object of a saved entry. */
+function isValidCursor(value: unknown): value is SavedProgress['cursor'] {
+  if (typeof value !== 'object' || value === null) {
     return false;
   }
-  if (typeof obj.lastMaxId !== 'string' || !isValidSnowflake(obj.lastMaxId)) {
+  const cursor = value as Record<string, unknown>;
+  if (cursor.maxId !== undefined && typeof cursor.maxId !== 'string') {
     return false;
   }
-
-  // Validate required number fields
-  if (typeof obj.timestamp !== 'number' || !Number.isFinite(obj.timestamp)) {
+  if (cursor.minId !== undefined && typeof cursor.minId !== 'string') {
     return false;
   }
-  if (typeof obj.deletedCount !== 'number' || !Number.isFinite(obj.deletedCount)) {
-    return false;
-  }
-  if (typeof obj.totalFound !== 'number' || !Number.isFinite(obj.totalFound)) {
-    return false;
-  }
-
-  // Validate optional string fields (must be valid snowflakes if present)
-  if (obj.guildId !== undefined) {
-    if (typeof obj.guildId !== 'string') {
-      return false;
-    }
-    // guildId can be a snowflake or special values like "@me"
-    if (obj.guildId !== '@me' && !isValidSnowflake(obj.guildId)) {
-      return false;
-    }
-  }
-  if (obj.channelId !== undefined) {
-    if (typeof obj.channelId !== 'string' || !isValidSnowflake(obj.channelId)) {
-      return false;
-    }
-  }
-
-  // Validate optional initialTotalFound
-  if (obj.initialTotalFound !== undefined) {
-    if (typeof obj.initialTotalFound !== 'number' || !Number.isFinite(obj.initialTotalFound)) {
-      return false;
-    }
-  }
-
-  // Validate filters object if present
-  if (obj.filters !== undefined) {
-    if (typeof obj.filters !== 'object' || obj.filters === null) {
-      return false;
-    }
-    const filters = obj.filters as Record<string, unknown>;
-
-    // Validate filter fields
-    if (filters.content !== undefined && typeof filters.content !== 'string') {
-      return false;
-    }
-    if (filters.hasLink !== undefined && typeof filters.hasLink !== 'boolean') {
-      return false;
-    }
-    if (filters.hasFile !== undefined && typeof filters.hasFile !== 'boolean') {
-      return false;
-    }
-    if (filters.includePinned !== undefined && typeof filters.includePinned !== 'boolean') {
-      return false;
-    }
-    if (filters.pattern !== undefined && typeof filters.pattern !== 'string') {
-      return false;
-    }
-    if (filters.minId !== undefined) {
-      if (typeof filters.minId !== 'string' || !isValidSnowflake(filters.minId)) {
-        return false;
-      }
-    }
-  }
-
   return true;
 }
 
 /**
- * Loads saved progress from localStorage.
+ * Validates the identity fields of a saved entry.
  *
- * @returns The saved progress if it exists, is valid, and is not expired, null otherwise
+ * @param obj - Parsed entry
+ * @returns True when version, run, author, order and target are all sound
  */
-export function loadProgress(): SavedProgress | null {
+function hasValidIdentity(obj: Record<string, unknown>): boolean {
+  if (obj.version !== SCHEMA_VERSION) {
+    return false;
+  }
+  if (typeof obj.runId !== 'string' || obj.runId === '') {
+    return false;
+  }
+  if (typeof obj.authorId !== 'string' || obj.authorId === '') {
+    return false;
+  }
+  if (obj.deletionOrder !== 'newest' && obj.deletionOrder !== 'oldest') {
+    return false;
+  }
+  if (obj.guildId !== undefined && typeof obj.guildId !== 'string') {
+    return false;
+  }
+  return obj.channelId === undefined || typeof obj.channelId === 'string';
+}
+
+/**
+ * Runtime type check for a parsed v2 progress entry.
+ *
+ * @param data - Value parsed from storage
+ * @returns True when the value matches the v2 schema
+ */
+export function isValidProgressData(data: unknown): data is SavedProgress {
+  if (typeof data !== 'object' || data === null) {
+    return false;
+  }
+  const obj = data as Record<string, unknown>;
+
+  if (!hasValidIdentity(obj)) {
+    return false;
+  }
+  if (!isValidCursor(obj.cursor)) {
+    return false;
+  }
+  if (
+    !allFiniteNumbers([
+      obj.deletedCount,
+      obj.failedCount,
+      obj.skippedCount,
+      obj.alreadyGoneCount,
+      obj.totalFound,
+      obj.initialTotalFound,
+      obj.timestamp,
+    ])
+  ) {
+    return false;
+  }
+  return obj.filters === undefined || isValidFilters(obj.filters);
+}
+
+// =============================================================================
+// Read / write
+// =============================================================================
+
+/**
+ * Reads and validates one entry, removing it when malformed or expired.
+ *
+ * @param storage - The page storage to read from
+ * @param key - Full storage key
+ * @returns The entry, or null when absent, malformed or expired
+ */
+function readEntry(storage: Storage, key: string): SavedProgress | null {
+  let raw: string | null;
   try {
-    const data = localStorage.getItem(STORAGE_KEY);
-    if (!data) {
-      return null;
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(data);
-    } catch {
-      // Invalid JSON - clear corrupted data
-      clearProgress();
-      return null;
-    }
-
-    // Validate the structure of the parsed data
-    if (!isValidProgressData(parsed)) {
-      // Invalid structure - clear corrupted data
-      clearProgress();
-      return null;
-    }
-
-    // Check if progress has expired (24 hours)
-    const now = Date.now();
-    if (now - parsed.timestamp > PROGRESS_EXPIRY_MS) {
-      // Clear expired progress
-      clearProgress();
-      return null;
-    }
-
-    return parsed;
+    raw = storage.getItem(key);
   } catch {
-    // Handle localStorage access errors
     return null;
   }
+  if (raw === null) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    removeKey(storage, key);
+    return null;
+  }
+
+  if (!isValidProgressData(parsed)) {
+    removeKey(storage, key);
+    return null;
+  }
+
+  if (Date.now() - parsed.timestamp > PROGRESS_EXPIRY_MS) {
+    removeKey(storage, key);
+    return null;
+  }
+
+  return parsed;
 }
 
-/**
- * Clears saved progress from localStorage.
- */
-export function clearProgress(): void {
+/** Removes a key, swallowing storage failures. */
+function removeKey(storage: Storage, key: string): void {
   try {
-    localStorage.removeItem(STORAGE_KEY);
+    storage.removeItem(key);
   } catch {
-    // Silently fail if localStorage is not available
+    // Nothing useful to do if the storage rejects the write.
   }
 }
 
 /**
- * Checks if there is an existing saved session that can be resumed.
+ * Saves deletion progress.
  *
- * @returns true if a valid, non-expired session exists
+ * Never throws: a userscript cannot usefully report a storage failure, and the
+ * run must continue without resume support.
+ *
+ * @param progress - The progress state to persist
  */
-export function hasExistingSession(): boolean {
-  return loadProgress() !== null;
+export function saveProgress(progress: SavedProgress): void {
+  const storage = getPageStorage();
+  if (!storage) {
+    return;
+  }
+  removeLegacyEntry(storage);
+  try {
+    storage.setItem(
+      storageKey(progress.authorId, targetKeyFor(progress)),
+      JSON.stringify(progress),
+    );
+  } catch {
+    // Quota exceeded or storage disabled; resume simply will not be offered.
+  }
 }
 
 /**
- * Gets the number of deletions until the next auto-save.
- * Progress is saved every 10 deletions.
+ * Loads saved progress for one author/target pair.
+ *
+ * @param authorId - The current user's ID
+ * @param targetKey - Key from {@link targetKeyFor}
+ * @returns The saved progress, or null when missing, malformed or expired
+ */
+export function loadProgress(authorId: string, targetKey: string): SavedProgress | null {
+  const storage = getPageStorage();
+  if (!storage) {
+    return null;
+  }
+  removeLegacyEntry(storage);
+  return readEntry(storage, storageKey(authorId, targetKey));
+}
+
+/**
+ * Finds the most recent resumable session for an author across all targets.
+ *
+ * Malformed and expired entries are removed as a side effect.
+ *
+ * @param authorId - The current user's ID
+ * @returns The newest non-expired entry, or null when there is none
+ */
+export function findResumableSession(authorId: string): SavedProgress | null {
+  const storage = getPageStorage();
+  if (!storage) {
+    return null;
+  }
+  removeLegacyEntry(storage);
+
+  const prefix = `${KEY_PREFIX}${authorId}:`;
+  const keys: string[] = [];
+  try {
+    for (let index = 0; index < storage.length; index++) {
+      const key = storage.key(index);
+      if (key?.startsWith(prefix)) {
+        keys.push(key);
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  let newest: SavedProgress | null = null;
+  for (const key of keys) {
+    const entry = readEntry(storage, key);
+    if (entry && (newest === null || entry.timestamp > newest.timestamp)) {
+      newest = entry;
+    }
+  }
+  return newest;
+}
+
+/**
+ * Clears saved progress for one author/target pair.
+ *
+ * @param authorId - The current user's ID
+ * @param targetKey - Key from {@link targetKeyFor}
+ */
+export function clearProgress(authorId: string, targetKey: string): void {
+  const storage = getPageStorage();
+  if (!storage) {
+    return;
+  }
+  removeLegacyEntry(storage);
+  removeKey(storage, storageKey(authorId, targetKey));
+}
+
+// =============================================================================
+// Save scheduling
+// =============================================================================
+
+/**
+ * Returns how many further deletions are needed before the next auto-save.
  *
  * @param deletedCount - Current number of deleted messages
- * @returns Number of deletions until next save (0-9)
+ * @returns A value between 1 and {@link SAVE_INTERVAL}
  */
 export function getDeletionsUntilSave(deletedCount: number): number {
-  return 10 - (deletedCount % 10);
+  return SAVE_INTERVAL - (deletedCount % SAVE_INTERVAL);
 }
 
 /**
- * Checks if progress should be saved based on deletion count.
+ * Whether progress should be auto-saved at this deletion count.
  *
  * @param deletedCount - Current number of deleted messages
- * @returns true if progress should be saved (every 10 deletions)
+ * @returns True every {@link SAVE_INTERVAL} deletions
  */
 export function shouldSaveProgress(deletedCount: number): boolean {
-  return deletedCount > 0 && deletedCount % 10 === 0;
+  return deletedCount > 0 && deletedCount % SAVE_INTERVAL === 0;
 }

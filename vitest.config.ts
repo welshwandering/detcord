@@ -28,7 +28,6 @@ export default defineConfig({
         'vite.config.ts',
         // Exclude files that are purely static content (no logic to test)
         'src/ui/styles.ts', // CSS string constant
-        'src/core/types.ts', // Type definitions only
         // Exclude barrel files (re-exports only)
         'src/ui/index.ts',
         'src/utils/index.ts',
