@@ -1254,8 +1254,8 @@ describe('DetcordUI', () => {
     it('only offers the server card inside a server', async () => {
       const serverCard = document.querySelector('[data-bind="serverCard"]') as HTMLElement;
       const dmCard = document.querySelector('[data-bind="dmCard"]') as HTMLElement;
-      expect(serverCard.style.display).toBe('block');
-      expect(dmCard.style.display).toBe('none');
+      expect(serverCard.hidden).toBe(false);
+      expect(dmCard.hidden).toBe(true);
     });
 
     it('ignores clicks that are not actions', () => {

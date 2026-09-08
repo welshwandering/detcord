@@ -345,6 +345,25 @@ function setSelected(root: ParentNode, selector: string, attribute: string, valu
 }
 
 /**
+ * Writes only the summary line, for changes that must not rewrite the inputs
+ * (typing in a text filter, flipping a toggle, picking a channel).
+ *
+ * @param state - Current wizard state
+ * @param root - Element containing the wizard markup
+ * @param ctx - Names and current channel for the summary; defaults from the DOM
+ */
+export function writeWizardSummary(
+  state: WizardState,
+  root: ParentNode,
+  ctx?: WizardSummaryContext,
+): void {
+  const summary = root.querySelector<HTMLElement>('[data-bind="wizardSummary"]');
+  if (summary) {
+    summary.textContent = describeWizardSummary(state, ctx ?? defaultSummaryContext(root));
+  }
+}
+
+/**
  * Writes wizard state onto the DOM controls.
  *
  * @param state - State to render
@@ -361,7 +380,9 @@ export function applyWizardState(
 
   for (const toggle of root.querySelectorAll('[data-action="toggleFilter"]')) {
     const key = toggle.getAttribute('data-toggle');
-    toggle.classList.toggle('on', key !== null && isFilterOn(state, key));
+    const on = key !== null && isFilterOn(state, key);
+    toggle.classList.toggle('on', on);
+    toggle.setAttribute('aria-checked', String(on));
   }
 
   const setInput = (name: string, value: string): void => {
@@ -386,10 +407,7 @@ export function applyWizardState(
   toggleVisible(root, '[data-bind="dateRangeContainer"]', state.timeRange === 'custom');
   toggleVisible(root, '[data-bind="deletionOrderGroup"]', SHOW_OLDEST_FIRST);
 
-  const summary = root.querySelector<HTMLElement>('[data-bind="wizardSummary"]');
-  if (summary) {
-    summary.textContent = describeWizardSummary(state, ctx ?? defaultSummaryContext(root));
-  }
+  writeWizardSummary(state, root, ctx);
 }
 
 function toggleVisible(root: ParentNode, selector: string, visible: boolean): void {

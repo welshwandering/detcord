@@ -182,6 +182,12 @@ export function getAuthorId(): string | null {
   return readJsonString(USER_ID_STORAGE_KEY) ?? getAuthorIdFromWebpack();
 }
 
+/** The current page URL, or an empty string when the location has none. */
+function currentHref(): string {
+  const href: unknown = window.location?.href;
+  return typeof href === 'string' ? href : '';
+}
+
 /**
  * Extracts the guild (server) ID from the current URL.
  *
@@ -191,7 +197,7 @@ export function getAuthorId(): string | null {
  * @returns The guild ID string, "@me" for DMs, or null if not found
  */
 export function getGuildIdFromUrl(): string | null {
-  const match = window.location.href.match(/channels\/([\w@]+)\/(\d+)/);
+  const match = currentHref().match(/channels\/([\w@]+)\/(\d+)/);
   return match?.[1] ?? null;
 }
 
@@ -203,7 +209,7 @@ export function getGuildIdFromUrl(): string | null {
  * @returns The channel ID string or null if not found
  */
 export function getChannelIdFromUrl(): string | null {
-  const match = window.location.href.match(/channels\/([\w@]+)\/(\d+)/);
+  const match = currentHref().match(/channels\/([\w@]+)\/(\d+)/);
   return match?.[2] ?? null;
 }
 

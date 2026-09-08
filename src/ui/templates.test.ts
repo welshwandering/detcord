@@ -5,8 +5,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   BUTTON_TEMPLATE,
-  createConfettiContainer,
-  createCountdownOverlay,
   createElement,
   createFeedItem,
   createPreviewItem,
@@ -265,13 +263,6 @@ describe('templates module', () => {
     });
   });
 
-  describe('createCountdownOverlay', () => {
-    it('creates overlay element', () => {
-      const overlay = createCountdownOverlay();
-      expect(overlay.className).toContain('countdown-overlay');
-    });
-  });
-
   describe('createStatusMessageElement', () => {
     it('creates status element', () => {
       const el = createStatusMessageElement();
@@ -286,13 +277,6 @@ describe('templates module', () => {
     it('handles empty initial message', () => {
       const el = createStatusMessageElement();
       expect(el.textContent).toBe('');
-    });
-  });
-
-  describe('createConfettiContainer', () => {
-    it('creates container element', () => {
-      const container = createConfettiContainer();
-      expect(container.className).toContain('confetti-container');
     });
   });
 

@@ -9,7 +9,7 @@
 
 import { getChannelIdFromUrl, getGuildIdFromUrl } from '../core/token';
 import { createCleanupManager } from '../utils/performance';
-import { ChannelPicker } from './channel-picker';
+import { ChannelPicker, channelNameFromDom } from './channel-picker';
 import {
   CSS_PREFIX,
   DEFAULT_FEED_THROTTLE_MS,
@@ -52,6 +52,8 @@ import {
   WIZARD_STEPS,
   type WizardState,
   type WizardStep,
+  type WizardSummaryContext,
+  writeWizardSummary,
 } from './wizard';
 import { WIZARD_STYLES } from './wizard-styles';
 
@@ -210,9 +212,12 @@ export class DetcordUI {
       this.channelPicker = new ChannelPicker({
         root: this.windowEl,
         selected: this.wizardState.selectedChannels,
-        onChange: () => this.invalidateReview(),
+        onChange: () => {
+          this.invalidateReview();
+          this.refreshWizardSummary();
+        },
       });
-      applyWizardState(this.wizardState, this.windowEl);
+      applyWizardState(this.wizardState, this.windowEl, this.summaryContext());
     }
 
     this.setupEventDelegation();
@@ -390,6 +395,7 @@ export class DetcordUI {
       }
       if (name) {
         this.invalidateReview();
+        this.refreshWizardSummary();
       }
     };
     container.addEventListener('input', handleInput);
@@ -592,7 +598,7 @@ export class DetcordUI {
     this.wizardState.target = target;
     this.invalidateReview();
     if (this.windowEl) {
-      applyWizardState(this.wizardState, this.windowEl);
+      applyWizardState(this.wizardState, this.windowEl, this.summaryContext());
     }
     if (target === 'specific') {
       void this.channelPicker?.load(this.apiClient, getGuildIdFromUrl());
@@ -607,7 +613,7 @@ export class DetcordUI {
     this.wizardState.timeRange = range;
     this.invalidateReview();
     if (this.windowEl) {
-      applyWizardState(this.wizardState, this.windowEl);
+      applyWizardState(this.wizardState, this.windowEl, this.summaryContext());
     }
   }
 
@@ -621,7 +627,27 @@ export class DetcordUI {
       return;
     }
     element.classList.toggle('on', value);
+    element.setAttribute('aria-checked', String(value));
     this.invalidateReview();
+    this.refreshWizardSummary();
+  }
+
+  /** Names and current channel for the summary line. */
+  private summaryContext(): WizardSummaryContext {
+    const root = this.windowEl;
+    return {
+      currentChannelId: getChannelIdFromUrl(),
+      channelName: (id) => (root ? channelNameFromDom(root, id) : undefined),
+    };
+  }
+
+  /** Re-reads the text inputs and rewrites the summary line, nothing else. */
+  private refreshWizardSummary(): void {
+    if (!this.windowEl) {
+      return;
+    }
+    readWizardInputs(this.wizardState, this.windowEl);
+    writeWizardSummary(this.wizardState, this.windowEl, this.summaryContext());
   }
 
   private handleReset(): void {
@@ -634,7 +660,7 @@ export class DetcordUI {
     this.lastProgress = null;
     this.reviewView?.clearErrors();
     if (this.windowEl) {
-      resetWizardState(this.wizardState, this.windowEl);
+      resetWizardState(this.wizardState, this.windowEl, this.summaryContext());
     }
     // Clear the picker after the state, so its "N selected" label agrees.
     this.channelPicker?.clear();
@@ -984,10 +1010,10 @@ export class DetcordUI {
     const dmCard = this.windowEl?.querySelector<HTMLElement>('[data-bind="dmCard"]');
     const serverCard = this.windowEl?.querySelector<HTMLElement>('[data-bind="serverCard"]');
     if (dmCard) {
-      dmCard.style.display = isDM ? 'block' : 'none';
+      dmCard.hidden = !isDM;
     }
     if (serverCard) {
-      serverCard.style.display = isServer ? 'block' : 'none';
+      serverCard.hidden = !isServer;
     }
   }
 

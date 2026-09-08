@@ -354,3 +354,24 @@ describe('token extraction', () => {
     });
   });
 });
+
+describe('URL helpers without an href', () => {
+  it('return null instead of throwing when location has no href', () => {
+    const original = window.location;
+    Object.defineProperty(window, 'location', {
+      value: { hostname: 'discord.com', pathname: '/app' },
+      writable: true,
+      configurable: true,
+    });
+    try {
+      expect(getGuildIdFromUrl()).toBeNull();
+      expect(getChannelIdFromUrl()).toBeNull();
+    } finally {
+      Object.defineProperty(window, 'location', {
+        value: original,
+        writable: true,
+        configurable: true,
+      });
+    }
+  });
+});

@@ -170,18 +170,18 @@ export function createWizardStepsHTML(): string {
 					<div class="${CSS_PREFIX}-toggle-group-label">Only messages with</div>
 					<div class="${CSS_PREFIX}-toggle">
 						<span class="${CSS_PREFIX}-toggle-label">Links</span>
-						<div class="${CSS_PREFIX}-toggle-switch" data-toggle="hasLink" data-action="toggleFilter"></div>
+						<button type="button" role="switch" aria-checked="false" aria-label="Only messages with links" class="${CSS_PREFIX}-toggle-switch" data-toggle="hasLink" data-action="toggleFilter"></button>
 					</div>
 					<div class="${CSS_PREFIX}-toggle">
 						<span class="${CSS_PREFIX}-toggle-label">Attachments</span>
-						<div class="${CSS_PREFIX}-toggle-switch" data-toggle="hasFile" data-action="toggleFilter"></div>
+						<button type="button" role="switch" aria-checked="false" aria-label="Only messages with attachments" class="${CSS_PREFIX}-toggle-switch" data-toggle="hasFile" data-action="toggleFilter"></button>
 					</div>
 				</div>
 
 				<div class="${CSS_PREFIX}-toggles">
 					<div class="${CSS_PREFIX}-toggle">
 						<span class="${CSS_PREFIX}-toggle-label">Include pinned messages</span>
-						<div class="${CSS_PREFIX}-toggle-switch" data-toggle="includePinned" data-action="toggleFilter"></div>
+						<button type="button" role="switch" aria-checked="false" aria-label="Include pinned messages" class="${CSS_PREFIX}-toggle-switch" data-toggle="includePinned" data-action="toggleFilter"></button>
 					</div>
 				</div>
 

@@ -70,4 +70,17 @@ export const WIZARD_STYLES = `
 	white-space: nowrap;
 	font-variant-numeric: tabular-nums;
 }
+
+/* Toggles are buttons with role="switch": reset the UA button box. */
+.${CSS_PREFIX}-toggle-switch {
+	appearance: none;
+	border: 0;
+	padding: 0;
+	font: inherit;
+}
+
+/* Target rows the current page cannot offer (DM, server) are hidden. */
+.${CSS_PREFIX}-card[hidden] {
+	display: none;
+}
 `;

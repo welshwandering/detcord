@@ -3,7 +3,7 @@
  */
 
 export type { ChannelPickerOptions, PickerChannel } from './channel-picker';
-export { ChannelPicker } from './channel-picker';
+export { ChannelPicker, channelNameFromDom } from './channel-picker';
 export type { DetcordUIOptions, ScreenId } from './controller';
 export { DetcordUI } from './controller';
 
@@ -54,8 +54,6 @@ export { DeletionRunner } from './runner';
 // Template exports
 export type { PreviewMessage } from './templates';
 export {
-  createConfettiContainer,
-  createCountdownOverlay,
   createPreviewScreenContent,
   createStatusMessageElement,
 } from './templates';
@@ -65,6 +63,7 @@ export type { TimeRangeId, WizardState, WizardStep } from './wizard';
 export {
   applyWizardState,
   createWizardState,
+  describeWizardSummary,
   readWizardInputs,
   resetWizardState,
   resolveTimeRange,
@@ -72,4 +71,5 @@ export {
   toggleFilter,
   validatePatternInput,
   WIZARD_STEPS,
+  writeWizardSummary,
 } from './wizard';

@@ -768,15 +768,6 @@ function createPreviewMessageElement(message: PreviewMessage): HTMLElement {
 }
 
 /**
- * Creates a countdown overlay element
- *
- * @returns HTMLElement for the countdown overlay
- */
-export function createCountdownOverlay(): HTMLElement {
-  return createElement('div', { class: 'countdown-overlay' }, []);
-}
-
-/**
  * Creates a status message element for the running screen
  *
  * @param initialMessage - Initial message to display
@@ -784,13 +775,4 @@ export function createCountdownOverlay(): HTMLElement {
  */
 export function createStatusMessageElement(initialMessage = ''): HTMLElement {
   return createElement('div', { class: 'status-message' }, [initialMessage]);
-}
-
-/**
- * Creates a confetti container element
- *
- * @returns HTMLElement for the confetti container
- */
-export function createConfettiContainer(): HTMLElement {
-  return createElement('div', { class: 'confetti-container' }, []);
 }
