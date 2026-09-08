@@ -29,6 +29,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 - Measured multi-channel progress against the total shown at review instead of the current channel's own total.
 - Dropped a manually entered token when Discord has since switched to a different account.
 - Captured relative date presets at the moment they are selected rather than at the review step.
+- Made Stop cancel the Discord request in flight through an `AbortSignal` instead of waiting for it to settle; the cancelled message is counted neither deleted nor failed.
 
 ### Changed
 
