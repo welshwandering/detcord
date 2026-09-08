@@ -17,12 +17,12 @@
 import type {
   DeletionEngineState,
   DeletionEngineStats,
+  DeletionOrder,
   DiscordMessage,
 } from '../core/deletion-engine';
 import { DeletionEngine } from '../core/deletion-engine';
 import { DiscordApiClient, type DiscordChannel } from '../core/discord-api';
 import { getAuthorId, getChannelIdFromUrl, getGuildIdFromUrl, getToken } from '../core/token';
-import type { DeletionOrder } from '../core/deletion-engine';
 import { dateToSnowflake, escapeHtml, formatDuration } from '../utils/helpers';
 import {
   createBoundedArray,
