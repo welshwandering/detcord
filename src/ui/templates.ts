@@ -523,6 +523,36 @@ export const WINDOW_TEMPLATE = `
 `;
 
 /**
+ * Apply an attribute map to an element.
+ *
+ * @param el - Element to update
+ * @param attrs - Attributes to set
+ */
+function applyAttributes(el: HTMLElement, attrs: Record<string, string>): void {
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key === 'class') {
+      el.className = value;
+    } else if (key.startsWith('data-')) {
+      el.dataset[key.slice(5)] = value;
+    } else {
+      el.setAttribute(key, value);
+    }
+  }
+}
+
+/**
+ * Append children to an element, escaping strings via text nodes.
+ *
+ * @param el - Element to append to
+ * @param children - Strings (escaped) or nodes (appended as-is)
+ */
+function appendChildren(el: HTMLElement, children: (string | Node)[]): void {
+  for (const child of children) {
+    el.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
+  }
+}
+
+/**
  * Create a DOM element safely with attributes and children
  * More efficient than innerHTML for dynamic content
  *
@@ -539,27 +569,10 @@ export function createElement<K extends keyof HTMLElementTagNameMap>(
   const el = document.createElement(tag);
 
   if (attrs) {
-    for (const [key, value] of Object.entries(attrs)) {
-      if (key === 'class') {
-        el.className = value;
-      } else if (key.startsWith('data-')) {
-        el.dataset[key.slice(5)] = value;
-      } else if (key.startsWith('aria-')) {
-        el.setAttribute(key, value);
-      } else {
-        el.setAttribute(key, value);
-      }
-    }
+    applyAttributes(el, attrs);
   }
-
   if (children) {
-    for (const child of children) {
-      if (typeof child === 'string') {
-        el.appendChild(document.createTextNode(child));
-      } else {
-        el.appendChild(child);
-      }
-    }
+    appendChildren(el, children);
   }
 
   return el;

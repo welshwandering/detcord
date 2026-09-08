@@ -1,0 +1,203 @@
+import { describe, expect, it } from 'vitest';
+import {
+  buildRunConfig,
+  describeRunConfig,
+  describeTarget,
+  describeTimeRange,
+  engineOptionsFor,
+  type RunConfigInput,
+  runConfigSignature,
+} from './run-config';
+
+const CHANNEL_A = '111111111111111111';
+const CHANNEL_B = '222222222222222222';
+const GUILD = '333333333333333333';
+
+function input(overrides: Partial<RunConfigInput> = {}): RunConfigInput {
+  return {
+    authorId: 'author-1',
+    scope: 'channel',
+    guildId: GUILD,
+    urlChannelId: CHANNEL_A,
+    routePath: `/channels/${GUILD}/${CHANNEL_A}`,
+    selectedChannelIds: [],
+    manualChannelId: '',
+    after: null,
+    before: null,
+    timeRangeLabel: 'Everything',
+    content: '',
+    pattern: '',
+    hasLink: false,
+    hasFile: false,
+    includePinned: false,
+    deletionOrder: 'newest',
+    ...overrides,
+  };
+}
+
+function unwrap(result: ReturnType<typeof buildRunConfig>) {
+  if (!result.ok) {
+    throw new Error(`expected ok, got: ${result.error}`);
+  }
+  return result.config;
+}
+
+describe('buildRunConfig', () => {
+  it('resolves the current channel for the channel scope', () => {
+    const config = unwrap(buildRunConfig(input()));
+    expect(config.channelIds).toEqual([CHANNEL_A]);
+    expect(config.guildId).toBeUndefined();
+    expect(config.routePath).toBe(`/channels/${GUILD}/${CHANNEL_A}`);
+  });
+
+  it('freezes the config so it cannot drift after the review step', () => {
+    const config = unwrap(buildRunConfig(input()));
+    expect(Object.isFrozen(config)).toBe(true);
+  });
+
+  it('rejects a specific target with nothing selected instead of falling back', () => {
+    const result = buildRunConfig(input({ scope: 'specific' }));
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/at least one channel/i);
+  });
+
+  it('rejects a manual channel ID that is not a snowflake', () => {
+    const result = buildRunConfig(input({ scope: 'specific', manualChannelId: 'not-an-id' }));
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/not a valid Discord channel ID/);
+  });
+
+  it('accepts a manual channel ID that is a snowflake', () => {
+    const config = unwrap(buildRunConfig(input({ scope: 'specific', manualChannelId: CHANNEL_B })));
+    expect(config.channelIds).toEqual([CHANNEL_B]);
+  });
+
+  it('keeps every picked channel, in order, without duplicating the manual entry', () => {
+    const config = unwrap(
+      buildRunConfig(
+        input({
+          scope: 'specific',
+          selectedChannelIds: [CHANNEL_A, CHANNEL_B],
+          manualChannelId: CHANNEL_B,
+        }),
+      ),
+    );
+    expect(config.channelIds).toEqual([CHANNEL_A, CHANNEL_B]);
+  });
+
+  it('rejects a server target outside a server', () => {
+    const result = buildRunConfig(input({ scope: 'server', guildId: '@me' }));
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/needs a server/);
+  });
+
+  it('keeps the guild for a server target', () => {
+    const config = unwrap(buildRunConfig(input({ scope: 'server' })));
+    expect(config.guildId).toBe(GUILD);
+    expect(config.channelIds).toEqual([CHANNEL_A]);
+  });
+
+  it('rejects an inverted date range', () => {
+    const result = buildRunConfig(
+      input({ after: new Date('2024-06-01T00:00:00Z'), before: new Date('2024-01-01T00:00:00Z') }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/must be before/);
+  });
+
+  it('rejects a regex that validateRegex refuses', () => {
+    const result = buildRunConfig(input({ pattern: '(a+)+' }));
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/performance/i);
+  });
+
+  it('rejects an unparseable regex', () => {
+    const result = buildRunConfig(input({ pattern: '([unclosed' }));
+    expect(result.ok).toBe(false);
+  });
+
+  it('requires an author ID', () => {
+    const result = buildRunConfig(input({ authorId: null }));
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe('runConfigSignature', () => {
+  it('matches for two identical configs', () => {
+    const a = unwrap(buildRunConfig(input()));
+    const b = unwrap(buildRunConfig(input()));
+    expect(runConfigSignature(a)).toBe(runConfigSignature(b));
+  });
+
+  it('differs when the route changes', () => {
+    const a = unwrap(buildRunConfig(input()));
+    const b = unwrap(buildRunConfig(input({ routePath: '/channels/@me/999' })));
+    expect(runConfigSignature(a)).not.toBe(runConfigSignature(b));
+  });
+
+  it('differs when a filter changes', () => {
+    const a = unwrap(buildRunConfig(input()));
+    const b = unwrap(buildRunConfig(input({ hasLink: true })));
+    expect(runConfigSignature(a)).not.toBe(runConfigSignature(b));
+  });
+});
+
+describe('describeRunConfig', () => {
+  it('names the channel and the resolved range', () => {
+    const after = new Date(2024, 0, 2, 3, 4);
+    const config = unwrap(buildRunConfig(input({ after, timeRangeLabel: 'Last 24 hours' })));
+    const lines = describeRunConfig(config);
+    expect(lines[0]?.value).toContain(CHANNEL_A);
+    expect(lines[1]?.value).toContain('Last 24 hours');
+    expect(lines[1]?.value).toContain(after.toLocaleDateString());
+  });
+
+  it('lists the filters that are on', () => {
+    const config = unwrap(
+      buildRunConfig(input({ hasLink: true, includePinned: true, content: 'hello' })),
+    );
+    const filters = describeRunConfig(config)[2]?.value ?? '';
+    expect(filters).toContain('has a link');
+    expect(filters).toContain('includes pinned');
+    expect(filters).toContain('"hello"');
+  });
+
+  it('describes multi-channel and server targets', () => {
+    const multi = unwrap(
+      buildRunConfig(input({ scope: 'specific', selectedChannelIds: [CHANNEL_A, CHANNEL_B] })),
+    );
+    expect(describeTarget(multi)).toContain('2 channels');
+    const server = unwrap(buildRunConfig(input({ scope: 'server' })));
+    expect(describeTarget(server)).toContain(GUILD);
+  });
+
+  it('describes the all-time and before-only ranges', () => {
+    const all = unwrap(buildRunConfig(input()));
+    expect(describeTimeRange(all)).toBe('All time');
+    const before = unwrap(buildRunConfig(input({ before: new Date(2024, 5, 1) })));
+    expect(describeTimeRange(before)).toMatch(/^Before /);
+  });
+});
+
+describe('engineOptionsFor', () => {
+  it('carries filters and dates through to the engine', () => {
+    const after = new Date('2024-01-01T00:00:00Z');
+    const config = unwrap(
+      buildRunConfig(input({ after, content: 'oops', hasFile: true, pattern: '^gg$' })),
+    );
+    const options = engineOptionsFor(config, CHANNEL_B, 'token-1');
+    expect(options.channelId).toBe(CHANNEL_B);
+    expect(options.authToken).toBe('token-1');
+    expect(options.authorId).toBe('author-1');
+    expect(options.content).toBe('oops');
+    expect(options.hasFile).toBe(true);
+    expect(options.pattern).toBe('^gg$');
+    expect(options.minId).toBeDefined();
+    expect(options.guildId).toBeUndefined();
+  });
+
+  it('only sets guildId for the server scope', () => {
+    const server = unwrap(buildRunConfig(input({ scope: 'server' })));
+    expect(engineOptionsFor(server, CHANNEL_A, 't').guildId).toBe(GUILD);
+  });
+});

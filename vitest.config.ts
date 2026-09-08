@@ -27,21 +27,16 @@ export default defineConfig({
         'commitlint.config.js',
         'vite.config.ts',
         // Exclude files that are purely static content (no logic to test)
-        'src/ui/styles.ts', // CSS string constant
+        'src/ui/window-styles.ts', // CSS string constant
         // Exclude barrel files (re-exports only)
         'src/ui/index.ts',
         'src/utils/index.ts',
-        // Exclude large UI files that are integration-tested rather than unit-tested
-        // These have extensive manual testing through the UI wizard flow
-        'src/ui/controller.ts',
       ],
       thresholds: {
-        // Thresholds adjusted for vitest 4.x V8 coverage provider
-        // which counts coverage differently than previous versions
-        lines: 75,
-        functions: 80,
-        branches: 68,
-        statements: 75,
+        lines: 85,
+        functions: 85,
+        branches: 75,
+        statements: 85,
       },
     },
     include: ['src/**/*.test.ts'],
