@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { dateToSnowflake, snowflakeToDate } from '../utils/helpers';
 import {
   buildRunConfig,
   describeRunConfig,
   describeTarget,
   describeTimeRange,
   engineOptionsFor,
+  newestBoundary,
   type RunConfigInput,
   runConfigSignature,
 } from './run-config';
@@ -85,6 +87,35 @@ describe('buildRunConfig', () => {
     expect(config.channelIds).toEqual([CHANNEL_A, CHANNEL_B]);
   });
 
+  it('accepts a selection right up to the cap', () => {
+    const channels = Array.from({ length: 25 }, (_, i) => `1111111111111111${String(10 + i)}`);
+    const config = unwrap(
+      buildRunConfig(input({ scope: 'specific', selectedChannelIds: channels })),
+    );
+    expect(config.channelIds).toHaveLength(25);
+  });
+
+  it('refuses more channels than a single run previews', () => {
+    const channels = Array.from({ length: 26 }, (_, i) => `1111111111111111${String(10 + i)}`);
+    const result = buildRunConfig(input({ scope: 'specific', selectedChannelIds: channels }));
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBe('Select up to 25 channels per run.');
+  });
+
+  it('captures the instant it was built as the upper bound', () => {
+    const before = Date.now();
+    const config = unwrap(buildRunConfig(input()));
+    const after = Date.now();
+    expect(config.newestAllowed.getTime()).toBeGreaterThanOrEqual(before);
+    expect(config.newestAllowed.getTime()).toBeLessThanOrEqual(after);
+  });
+
+  it('reuses a supplied upper bound, for a resumed run', () => {
+    const captured = new Date('2024-03-04T05:06:07Z');
+    const config = unwrap(buildRunConfig(input({ newestAllowed: captured })));
+    expect(config.newestAllowed).toEqual(captured);
+  });
+
   it('rejects a server target outside a server', () => {
     const result = buildRunConfig(input({ scope: 'server', guildId: '@me' }));
     expect(result.ok).toBe(false);
@@ -140,6 +171,12 @@ describe('runConfigSignature', () => {
     const b = unwrap(buildRunConfig(input({ hasLink: true })));
     expect(runConfigSignature(a)).not.toBe(runConfigSignature(b));
   });
+
+  it('differs when the upper bound changes', () => {
+    const a = unwrap(buildRunConfig(input({ newestAllowed: new Date('2024-01-01T00:00:00Z') })));
+    const b = unwrap(buildRunConfig(input({ newestAllowed: new Date('2024-01-01T00:00:01Z') })));
+    expect(runConfigSignature(a)).not.toBe(runConfigSignature(b));
+  });
 });
 
 describe('describeRunConfig', () => {
@@ -156,10 +193,18 @@ describe('describeRunConfig', () => {
     const config = unwrap(
       buildRunConfig(input({ hasLink: true, includePinned: true, content: 'hello' })),
     );
-    const filters = describeRunConfig(config)[2]?.value ?? '';
+    const filters = describeRunConfig(config)[3]?.value ?? '';
     expect(filters).toContain('has a link');
     expect(filters).toContain('includes pinned');
     expect(filters).toContain('"hello"');
+  });
+
+  it('shows the upper bound the run was given', () => {
+    const captured = new Date(2024, 4, 6, 7, 8);
+    const config = unwrap(buildRunConfig(input({ newestAllowed: captured })));
+    const cutoff = describeRunConfig(config)[2];
+    expect(cutoff?.value).toContain('Messages up to');
+    expect(cutoff?.value).toContain(captured.toLocaleDateString());
   });
 
   it('describes multi-channel and server targets', () => {
@@ -199,5 +244,27 @@ describe('engineOptionsFor', () => {
   it('only sets guildId for the server scope', () => {
     const server = unwrap(buildRunConfig(input({ scope: 'server' })));
     expect(engineOptionsFor(server, CHANNEL_A, 't').guildId).toBe(GUILD);
+  });
+
+  it('bounds the run at the instant the config was built', () => {
+    const captured = new Date('2024-07-01T12:00:00Z');
+    const config = unwrap(buildRunConfig(input({ newestAllowed: captured })));
+    expect(engineOptionsFor(config, CHANNEL_A, 't').maxId).toBe(dateToSnowflake(captured));
+  });
+
+  it('takes the earlier of the "before" filter and the capture instant', () => {
+    const captured = new Date('2024-07-01T12:00:00Z');
+    const before = new Date('2024-01-01T00:00:00Z');
+    const earlier = unwrap(buildRunConfig(input({ before, newestAllowed: captured })));
+    expect(engineOptionsFor(earlier, CHANNEL_A, 't').maxId).toBe(dateToSnowflake(before));
+    expect(newestBoundary(earlier)).toEqual(before);
+
+    const later = unwrap(
+      buildRunConfig(input({ before: new Date('2025-01-01T00:00:00Z'), newestAllowed: captured })),
+    );
+    expect(engineOptionsFor(later, CHANNEL_A, 't').maxId).toBe(dateToSnowflake(captured));
+    expect(snowflakeToDate(engineOptionsFor(later, CHANNEL_A, 't').maxId as string)).toEqual(
+      captured,
+    );
   });
 });

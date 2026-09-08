@@ -17,7 +17,7 @@ import {
   DEFAULT_PROGRESS_THROTTLE_MS,
 } from './constants';
 import { createStatusRotator, runCountdownSequence } from './effects';
-import { confirmToken, errorMessage, resolveIdentity } from './identity';
+import { confirmToken, errorMessage, type IdentityResult, resolveIdentity } from './identity';
 import {
   type ApiClientFactory,
   type ApiClientPort,
@@ -30,9 +30,10 @@ import {
   targetKeyFor,
 } from './ports';
 import { ProgressView } from './progress-view';
-import { configForSavedSession, describeSavedSession, savedSessionTarget } from './resume';
+import { describeSavedSession, resumePlanFor, savedSessionTarget } from './resume';
 import { ReviewView } from './review-view';
 import { buildRunConfig, type RunConfig, runConfigSignature, type TargetScope } from './run-config';
+import { clearRunPlan, loadRunPlan, type RunPlanTotals } from './run-plan';
 import { DeletionRunner, type RunProgress, type RunSummary } from './runner';
 import { createMiniIndicator, type DraggingHandle, enableWindowDragging } from './window-chrome';
 import { createWindowHTML, TRIGGER_ICON } from './window-markup';
@@ -82,6 +83,10 @@ const ROUTE_WATCH_INTERVAL_MS = 250;
 const ROUTE_DRIFT_MESSAGE =
   'You navigated to a different channel, so the preview no longer matches. Check the target and continue again.';
 
+/** Message shown when the Discord account changed under a reviewed config. */
+const ACCOUNT_CHANGED_MESSAGE =
+  'Your Discord account changed, so that run no longer applies. Check the target and continue again.';
+
 /**
  * Main UI controller for Detcord.
  */
@@ -100,6 +105,7 @@ export class DetcordUI {
   private minimized = false;
   private currentScreen: ScreenId = 'setup';
   private identityChecked = false;
+  private manualIdentity = false;
 
   private token: string | null = null;
   private authorId: string | null = null;
@@ -127,6 +133,8 @@ export class DetcordUI {
   private statusRotator: { start: () => void; stop: () => void } | null = null;
   private pendingResume: SavedProgress | null = null;
   private resumeWith: SavedProgress | null = null;
+  private resumeTotals: RunPlanTotals | null = null;
+  private identityGeneration = 0;
   private lastProgress: RunProgress | null = null;
 
   constructor(options?: DetcordUIOptions) {
@@ -258,10 +266,12 @@ export class DetcordUI {
     this.setVisibility('runChoice', false);
     this.updateTargetCards();
 
-    if (!this.identityChecked) {
-      this.identityChecked = true;
+    // Identity is re-checked on every open: the SPA can switch accounts, and a
+    // first failure has to be retryable. A hand-pasted token is kept, because
+    // it cannot be read back off the page.
+    if (!this.runner.isActive() && !this.manualIdentity) {
       void this.establishIdentity();
-    } else if (this.authorId) {
+    } else if (this.identityChecked && this.authorId) {
       this.offerResume(this.authorId);
     }
 
@@ -414,17 +424,61 @@ export class DetcordUI {
 
   /**
    * Establishes which account the token belongs to, then offers any resume.
+   *
+   * A stale result - one from a request that a newer one has overtaken - is
+   * dropped, so the account on screen is always the last one asked for.
    */
   private async establishIdentity(): Promise<void> {
+    const generation = ++this.identityGeneration;
     const identity = await resolveIdentity(this.createApiClient);
+    if (generation !== this.identityGeneration) {
+      return;
+    }
     if (!identity.ok) {
+      // The flag stays unset so the next open, or "Try again", retries.
+      this.identityChecked = false;
       this.showError(identity.error);
       return;
     }
-    this.token = identity.token;
-    this.authorId = identity.authorId;
-    this.apiClient = identity.client;
-    this.offerResume(identity.authorId);
+    this.acceptIdentity(identity.token, identity.authorId, identity.client, false);
+  }
+
+  /**
+   * Takes on a confirmed identity, discarding anything the previous account
+   * had reviewed or could have resumed.
+   *
+   * @param token - The confirmed token
+   * @param authorId - The account Discord says owns it
+   * @param client - Client bound to that token
+   * @param manual - Whether the token was pasted by hand
+   */
+  private acceptIdentity(
+    token: string,
+    authorId: string,
+    client: ApiClientPort,
+    manual: boolean,
+  ): void {
+    const switched = this.authorId !== null && this.authorId !== authorId;
+    this.token = token;
+    this.authorId = authorId;
+    this.apiClient = client;
+    this.identityChecked = true;
+    this.manualIdentity = manual;
+
+    if (switched) {
+      this.invalidateReview();
+      this.reviewView?.clearErrors();
+      this.pendingResume = null;
+      this.resumeWith = null;
+      this.resumeTotals = null;
+      this.setVisibility('resumePrompt', false);
+    }
+    // A confirmed identity clears whatever failure put the error screen up.
+    if (this.currentScreen === 'error') {
+      this.showScreen('setup');
+      this.updateTargetCards();
+    }
+    this.offerResume(authorId);
   }
 
   /**
@@ -432,28 +486,53 @@ export class DetcordUI {
    */
   private async handleManualToken(): Promise<void> {
     const input = this.windowEl?.querySelector<HTMLInputElement>('[data-input="manualToken"]');
-    const token = input?.value.trim();
+    let token = '';
+    try {
+      token = input?.value.trim() ?? '';
+    } finally {
+      // The token leaves the DOM before anything can await, so a client that
+      // rejects it cannot leave it sitting in the field.
+      if (input) {
+        input.value = '';
+      }
+    }
     if (!token) {
       this.showError('Please enter a token.');
       return;
     }
 
-    const identity = await confirmToken(token, this.createApiClient, false);
-    if (input) {
-      input.value = '';
+    const generation = ++this.identityGeneration;
+    this.setActionDisabled('useManualToken', true);
+    let identity: IdentityResult;
+    try {
+      identity = await confirmToken(token, this.createApiClient, false);
+    } finally {
+      if (generation === this.identityGeneration) {
+        this.setActionDisabled('useManualToken', false);
+      }
+    }
+
+    if (generation !== this.identityGeneration) {
+      return;
     }
     if (!identity.ok) {
       this.showError(identity.error);
       return;
     }
 
-    this.token = identity.token;
-    this.authorId = identity.authorId;
-    this.apiClient = identity.client;
-    this.identityChecked = true;
-    this.showScreen('setup');
-    this.updateTargetCards();
-    this.offerResume(identity.authorId);
+    this.acceptIdentity(identity.token, identity.authorId, identity.client, true);
+  }
+
+  private setActionDisabled(action: string, disabled: boolean): void {
+    const button = this.windowEl?.querySelector<HTMLElement>(`[data-action="${action}"]`);
+    if (!button) {
+      return;
+    }
+    if (disabled) {
+      button.setAttribute('disabled', 'disabled');
+    } else {
+      button.removeAttribute('disabled');
+    }
   }
 
   // =========================================================================
@@ -538,6 +617,7 @@ export class DetcordUI {
     this.progressView.reset();
     this.invalidateReview();
     this.resumeWith = null;
+    this.resumeTotals = null;
     this.lastProgress = null;
     this.reviewView?.clearErrors();
     if (this.windowEl) {
@@ -547,6 +627,10 @@ export class DetcordUI {
     this.channelPicker?.clear();
     this.showScreen('setup');
     this.showWizardStep('location');
+    // "Try again" on the error screen: retry the identity that failed.
+    if (!this.identityChecked && !this.runner.isActive()) {
+      void this.establishIdentity();
+    }
   }
 
   // =========================================================================
@@ -734,6 +818,14 @@ export class DetcordUI {
     if (this.runner.isActive() || this.checkRouteDrift() || !this.token) {
       return;
     }
+    if (config.authorId !== this.authorId) {
+      this.invalidateReview();
+      this.resumeWith = null;
+      this.resumeTotals = null;
+      this.showScreen('setup');
+      this.showStepError('locationError', ACCOUNT_CHANGED_MESSAGE, 'location');
+      return;
+    }
     this.stopRouteWatch();
     this.lastProgress = null;
     this.progressView.reset();
@@ -741,8 +833,10 @@ export class DetcordUI {
     this.startStatusRotation();
 
     const resumeFrom = this.resumeWith ?? undefined;
+    const baseTotals = this.resumeTotals ?? undefined;
     this.resumeWith = null;
-    void this.runner.start(this.token, config, resumeFrom);
+    this.resumeTotals = null;
+    void this.runner.start(this.token, config, resumeFrom, baseTotals);
   }
 
   private handlePause(): void {
@@ -811,19 +905,26 @@ export class DetcordUI {
 
   private handleResumeSession(): void {
     const saved = this.pendingResume;
-    if (!saved || !this.token || !this.authorId) {
+    const authorId = this.authorId;
+    if (!saved || !this.token || !authorId) {
       return;
     }
-    const config = configForSavedSession(saved, getChannelIdFromUrl(), window.location.pathname);
-    if (!config) {
+    const resume = resumePlanFor(
+      saved,
+      getChannelIdFromUrl(),
+      window.location.pathname,
+      loadRunPlan(authorId),
+    );
+    if (!resume) {
       this.showStepError('locationError', 'That saved session has no usable target.', 'location');
       return;
     }
     this.setVisibility('resumePrompt', false);
     this.pendingResume = null;
     this.resumeWith = saved;
-    this.reviewConfig = config;
-    this.beginRun(config);
+    this.resumeTotals = resume.baseTotals;
+    this.reviewConfig = resume.config;
+    this.beginRun(resume.config);
   }
 
   private handleDiscardSession(): void {
@@ -832,6 +933,7 @@ export class DetcordUI {
     this.setVisibility('resumePrompt', false);
     if (saved) {
       clearProgress(saved.authorId, targetKeyFor(savedSessionTarget(saved)));
+      clearRunPlan(saved.authorId);
     }
   }
 

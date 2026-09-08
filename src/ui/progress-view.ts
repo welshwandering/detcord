@@ -75,6 +75,43 @@ const COMPLETION_ICONS: Record<RunSummary['reason'], string> = {
   error: '\u26A0\uFE0F',
 };
 
+/**
+ * Titles a finished run by what actually happened to the messages.
+ *
+ * A completed run that left failures or skips behind is not a clean sweep and
+ * must not be announced as one.
+ *
+ * @param summary - How the run ended
+ * @returns The heading for the completion screen
+ */
+export function completionTitle(summary: RunSummary): string {
+  if (summary.reason !== 'completed') {
+    return COMPLETION_TITLES[summary.reason];
+  }
+  if (summary.failed > 0) {
+    return 'Finished with failures';
+  }
+  if (summary.skipped > 0) {
+    return 'Finished, some skipped';
+  }
+  return COMPLETION_TITLES.completed;
+}
+
+/**
+ * Lists every outcome of a finished run.
+ *
+ * @param summary - How the run ended
+ * @returns One dot-separated phrase per counter that applies
+ */
+export function completionCounts(summary: RunSummary): string {
+  const parts = [`${summary.deleted} deleted`];
+  if (summary.alreadyGone > 0) {
+    parts.push(`${summary.alreadyGone} already gone`);
+  }
+  parts.push(`${summary.skipped} skipped`, `${summary.failed} failed`);
+  return parts.join(' \u00B7 ');
+}
+
 /** Renders deletion progress into the running and completion screens. */
 export class ProgressView {
   private root: ParentNode | null = null;
@@ -260,12 +297,8 @@ export class ProgressView {
       return;
     }
     this.setBoundText(root, 'completeIcon', COMPLETION_ICONS[summary.reason]);
-    this.setBoundText(root, 'completeTitle', COMPLETION_TITLES[summary.reason]);
-    this.setBoundText(
-      root,
-      'completeSummary',
-      `${summary.deleted} deleted \u00B7 ${summary.skipped} skipped \u00B7 ${summary.failed} failed`,
-    );
+    this.setBoundText(root, 'completeTitle', completionTitle(summary));
+    this.setBoundText(root, 'completeSummary', completionCounts(summary));
     this.setBoundText(root, 'completeDuration', `in ${formatDuration(summary.durationMs)}`);
 
     const detail = root.querySelector<HTMLElement>('[data-bind="completeDetail"]');
@@ -280,7 +313,12 @@ export class ProgressView {
       detail.style.display = message ? 'block' : 'none';
     }
 
-    if (summary.reason === 'completed' && summary.failed === 0) {
+    if (
+      summary.reason === 'completed' &&
+      summary.deleted > 0 &&
+      summary.skipped === 0 &&
+      summary.failed === 0
+    ) {
       const container = root.querySelector<HTMLElement>('[data-bind="confettiContainer"]');
       if (container) {
         createConfetti(container, 30);

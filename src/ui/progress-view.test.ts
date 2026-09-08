@@ -165,8 +165,35 @@ describe('ProgressView', () => {
     expect(root.querySelector('.confetti')).toBeNull();
   });
 
+  it('says so when a completed run left failures behind', () => {
+    view.showCompletion(summary({ failed: 2 }));
+    expect(text('completeTitle')).toBe('Finished with failures');
+  });
+
+  it('says so when a completed run skipped messages', () => {
+    view.showCompletion(summary({ skipped: 3 }));
+    expect(text('completeTitle')).toBe('Finished, some skipped');
+    expect(root.querySelector('.confetti')).toBeNull();
+  });
+
+  it('reports failures ahead of skips when both happened', () => {
+    view.showCompletion(summary({ failed: 1, skipped: 1 }));
+    expect(text('completeTitle')).toBe('Finished with failures');
+  });
+
+  it('counts messages that were already gone', () => {
+    view.showCompletion(summary({ alreadyGone: 4 }));
+    expect(text('completeSummary')).toBe('5 deleted · 4 already gone · 0 skipped · 0 failed');
+  });
+
+  it('does not celebrate a run that deleted nothing', () => {
+    view.showCompletion(summary({ deleted: 0 }));
+    expect(text('completeTitle')).toBe('All clean!');
+    expect(root.querySelector('.confetti')).toBeNull();
+  });
+
   it('announces a run the user stopped', () => {
-    view.showCompletion(summary({ reason: 'stopped' }));
+    view.showCompletion(summary({ reason: 'stopped', failed: 2, skipped: 1 }));
     expect(text('completeTitle')).toBe('Stopped by you');
     expect(root.querySelector('.confetti')).toBeNull();
   });

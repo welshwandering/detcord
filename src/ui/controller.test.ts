@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { resetPageStorage } from '../core/storage';
 import { getChannelIdFromUrl, getGuildIdFromUrl, getToken } from '../core/token';
 import { snowflakeToDate } from '../utils/helpers';
 import { DetcordUI, type DetcordUIOptions } from './controller';
@@ -15,6 +16,7 @@ import type {
   PreviewResult,
   SavedProgress,
 } from './ports';
+import { loadRunPlan, saveRunPlan } from './run-plan';
 
 vi.mock('../core/token', () => ({
   getToken: vi.fn(),
@@ -26,6 +28,7 @@ vi.mock('../core/token', () => ({
 const GUILD = '999999999999999999';
 const CHANNEL = '111111111111111111';
 const CHANNEL_B = '222222222222222222';
+const CHANNEL_C = '333333333333333333';
 const ROUTE = `/channels/${GUILD}/${CHANNEL}`;
 const COUNTDOWN_MS = 3400;
 
@@ -231,6 +234,8 @@ describe('DetcordUI', () => {
     document.body.innerHTML = '';
     document.head.innerHTML = '';
     window.history.pushState({}, '', ROUTE);
+    resetPageStorage();
+    window.localStorage.clear();
     FakeEngine.instances = [];
     FakeEngine.previewTotal = 4;
     FakeEngine.previewFiltersApplied = false;
@@ -257,6 +262,8 @@ describe('DetcordUI', () => {
     vi.useRealTimers();
     document.body.innerHTML = '';
     document.head.innerHTML = '';
+    resetPageStorage();
+    window.localStorage.clear();
     vi.clearAllMocks();
   });
 
@@ -405,6 +412,153 @@ describe('DetcordUI', () => {
       clickAction('useManualToken');
       await flush();
       expect(boundText('errorMessage')).toMatch(/enter a token/i);
+    });
+
+    it('reports a token the client refuses to be built with, and clears it', async () => {
+      vi.mocked(getToken).mockReturnValue(null);
+      ui = mountUI({
+        createApiClient: (token: string) => {
+          if (token === 'not-a-token') {
+            throw new Error('Invalid Discord token format');
+          }
+          return makeClient();
+        },
+      });
+      ui.show();
+      await flush();
+
+      const input = document.querySelector('[data-input="manualToken"]') as HTMLInputElement;
+      input.value = 'not-a-token';
+      clickAction('useManualToken');
+      await flush();
+
+      expect(boundText('errorMessage')).toBe('That does not look like a Discord token.');
+      expect(input.value).toBe('');
+      expect(ui.getCurrentScreen()).toBe('error');
+    });
+
+    it('refuses a second confirmation while one is in flight', async () => {
+      vi.mocked(getToken).mockReturnValue(null);
+      let resolveUser = (_user: CurrentUser): void => {};
+      getCurrentUserSpy = vi.fn(
+        () =>
+          new Promise<CurrentUser>((resolve) => {
+            resolveUser = resolve;
+          }),
+      );
+      ui = mountUI();
+      ui.show();
+      await flush();
+
+      const input = document.querySelector('[data-input="manualToken"]') as HTMLInputElement;
+      input.value = 'first-token';
+      clickAction('useManualToken');
+      await flush();
+
+      const button = document.querySelector('[data-action="useManualToken"]') as HTMLElement;
+      expect(button.hasAttribute('disabled')).toBe(true);
+      input.value = 'second-token';
+      clickAction('useManualToken');
+      await flush();
+      expect(getCurrentUserSpy).toHaveBeenCalledTimes(1);
+
+      resolveUser({ id: 'pasted-account', username: 'me', globalName: null });
+      await flush();
+      expect(button.hasAttribute('disabled')).toBe(false);
+      expect(ui.getCurrentScreen()).toBe('setup');
+    });
+
+    it('keeps the account from the newest confirmation when two overlap', async () => {
+      const pending: Array<(user: CurrentUser) => void> = [];
+      getCurrentUserSpy = vi.fn(
+        () =>
+          new Promise<CurrentUser>((resolve) => {
+            pending.push(resolve);
+          }),
+      );
+      ui = mountUI();
+      ui.show();
+      await flush();
+      ui.hide();
+      ui.show();
+      await flush();
+      expect(pending).toHaveLength(2);
+
+      // The newer request answers first; the older one straggles in after it.
+      pending[1]?.({ id: 'newest-account', username: 'b', globalName: null });
+      await flush();
+      pending[0]?.({ id: 'stale-account', username: 'a', globalName: null });
+      await flush();
+
+      await gotoReview();
+      expect(previewEngines()[0]?.options?.authorId).toBe('newest-account');
+    });
+
+    it('retries a failed identity the next time the window opens', async () => {
+      currentUserError = new Error('network down');
+      ui = mountUI();
+      ui.show();
+      await flush();
+      expect(ui.getCurrentScreen()).toBe('error');
+
+      currentUserError = null;
+      ui.hide();
+      ui.show();
+      await flush();
+
+      expect(ui.getCurrentScreen()).toBe('setup');
+      await gotoReview();
+      expect(previewEngines()[0]?.options?.authorId).toBe('author-1');
+    });
+
+    it('retries a failed identity when Try again is pressed', async () => {
+      currentUserError = new Error('network down');
+      ui = mountUI();
+      ui.show();
+      await flush();
+      expect(ui.getCurrentScreen()).toBe('error');
+
+      currentUserError = null;
+      clickAction('reset');
+      await flush();
+      expect(ui.getCurrentScreen()).toBe('setup');
+    });
+
+    it('leaves identity alone while a deletion is running', async () => {
+      const releaseRun = holdRuns();
+      ui = mountUI();
+      ui.show();
+      await flush();
+      await gotoReview();
+      clickAction('confirmDelete');
+      await flush(COUNTDOWN_MS);
+
+      const before = getCurrentUserSpy.mock.calls.length;
+      clickAction('close');
+      clickAction('keepRunning');
+      ui.show();
+      await flush();
+      expect(getCurrentUserSpy.mock.calls.length).toBe(before);
+
+      await releaseRun();
+    });
+
+    it('invalidates a reviewed run when the account changes', async () => {
+      ui = mountUI();
+      ui.show();
+      await flush();
+      await gotoReview();
+      expect(confirmButton().hasAttribute('disabled')).toBe(false);
+
+      currentUser = { id: 'someone-else', username: 'other', globalName: null };
+      ui.hide();
+      ui.show();
+      await flush();
+
+      expect(confirmButton().hasAttribute('disabled')).toBe(true);
+      clickAction('confirmDelete');
+      await flush(COUNTDOWN_MS);
+      expect(startedEngines()).toHaveLength(0);
     });
   });
 
@@ -874,6 +1028,105 @@ describe('DetcordUI', () => {
       ui.show();
       await flush();
       expect(ui.getCurrentScreen()).toBe('setup');
+    });
+
+    it('refuses a saved session that belongs to another account', async () => {
+      ui = mountUI({ findResumableSession: () => ({ ...saved, authorId: 'author-2' }) });
+      ui.show();
+      await flush();
+      clickAction('resumeSession');
+      await flush();
+      expect(startedEngines()).toHaveLength(0);
+      expect(boundText('locationError')).toMatch(/account changed/i);
+
+      // The refused session must not be carried into the next run either.
+      await gotoReview();
+      clickAction('confirmDelete');
+      await flush(COUNTDOWN_MS);
+      expect(startedEngines()[0]?.resumedFrom).toBeNull();
+    });
+
+    it('continues into the channels a stopped multi-channel run never reached', async () => {
+      saveRunPlan({
+        version: 1,
+        authorId: 'author-1',
+        scope: 'specific',
+        channelIds: [CHANNEL, CHANNEL_B, CHANNEL_C],
+        index: 1,
+        newestAllowed: Date.parse('2024-05-01T10:00:00Z'),
+        hasLink: false,
+        hasFile: false,
+        includePinned: false,
+        deletionOrder: 'newest',
+        timeRangeLabel: 'Everything',
+        completedTotals: { deleted: 5, failed: 0, skipped: 0, alreadyGone: 0 },
+        savedAt: Date.parse('2024-05-01T10:04:00Z'),
+      });
+
+      ui = mountUI({ findResumableSession: () => ({ ...saved, channelId: CHANNEL_B }) });
+      ui.show();
+      await flush();
+      clickAction('resumeSession');
+      await flush();
+
+      const runs = startedEngines();
+      expect(runs.map((engine) => engine.options?.channelId)).toEqual([CHANNEL_B, CHANNEL_C]);
+      // Five from the channel that finished before the stop, one each for B and C.
+      expect(boundText('completeSummary')).toContain('7 deleted');
+      expect(loadRunPlan('author-1')).toBeNull();
+    });
+
+    it('reuses the upper bound the interrupted run was given', async () => {
+      const captured = new Date('2024-05-01T10:00:00Z');
+      saveRunPlan({
+        version: 1,
+        authorId: 'author-1',
+        scope: 'specific',
+        channelIds: [CHANNEL_B, CHANNEL_C],
+        index: 0,
+        newestAllowed: captured.getTime(),
+        hasLink: false,
+        hasFile: false,
+        includePinned: false,
+        deletionOrder: 'newest',
+        timeRangeLabel: 'Everything',
+        completedTotals: { deleted: 0, failed: 0, skipped: 0, alreadyGone: 0 },
+        savedAt: captured.getTime(),
+      });
+
+      ui = mountUI({ findResumableSession: () => ({ ...saved, channelId: CHANNEL_B }) });
+      ui.show();
+      await flush();
+      clickAction('resumeSession');
+      await flush();
+
+      const maxId = startedEngines()[0]?.options?.maxId as string;
+      expect(snowflakeToDate(maxId)).toEqual(captured);
+    });
+
+    it('drops a run plan along with the session it was discarded with', async () => {
+      saveRunPlan({
+        version: 1,
+        authorId: 'author-1',
+        scope: 'specific',
+        channelIds: [CHANNEL, CHANNEL_B],
+        index: 0,
+        newestAllowed: Date.now(),
+        hasLink: false,
+        hasFile: false,
+        includePinned: false,
+        deletionOrder: 'newest',
+        timeRangeLabel: 'Everything',
+        completedTotals: { deleted: 0, failed: 0, skipped: 0, alreadyGone: 0 },
+        savedAt: Date.now(),
+      });
+
+      ui = mountUI({ findResumableSession: () => saved });
+      ui.show();
+      await flush();
+      clickAction('discardSession');
+      await flush();
+      expect(loadRunPlan('author-1')).toBeNull();
     });
   });
 

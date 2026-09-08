@@ -10,6 +10,7 @@
 
 import { dateToSnowflake } from '../utils/helpers';
 import { isValidSnowflake, validateRegex } from '../utils/validators';
+import { MAX_SELECTED_CHANNELS } from './constants';
 import type { DeletionEngineOptions, DeletionOrder } from './ports';
 
 /** Where the user wants to delete from. */
@@ -26,6 +27,13 @@ export interface RunConfig {
   readonly routePath: string;
   readonly after: Date | undefined;
   readonly before: Date | undefined;
+  /**
+   * Upper bound on the messages a run may touch.
+   *
+   * Captured when the config is built, so messages posted after the preview
+   * are out of scope for the run the user confirmed.
+   */
+  readonly newestAllowed: Date;
   readonly content: string | undefined;
   readonly pattern: string | undefined;
   readonly hasLink: boolean;
@@ -47,6 +55,11 @@ export interface RunConfigInput {
   manualChannelId: string;
   after: Date | null;
   before: Date | null;
+  /**
+   * Upper bound to reuse, for a resumed run. A fresh run leaves this unset and
+   * gets the current instant.
+   */
+  newestAllowed?: Date | null;
   timeRangeLabel: string;
   content: string;
   pattern: string;
@@ -92,7 +105,8 @@ function resolveServerTarget(input: RunConfigInput): TargetResolution | string {
  * Resolves a "Specific" target from the picker and the manual ID field.
  *
  * An empty selection is a validation error: it must never silently fall back
- * to whichever channel happens to be open.
+ * to whichever channel happens to be open. The selection is capped because
+ * every channel is previewed before the run starts.
  *
  * @param input - Raw wizard state
  * @returns The resolved target, or an error message
@@ -105,6 +119,9 @@ function resolveSpecificTarget(input: RunConfigInput): TargetResolution | string
   }
   if (ids.length === 0) {
     return 'Pick at least one channel, or enter a channel ID.';
+  }
+  if (ids.length > MAX_SELECTED_CHANNELS) {
+    return `Select up to ${MAX_SELECTED_CHANNELS} channels per run.`;
   }
   const invalid = ids.find((id) => !isValidSnowflake(id));
   if (invalid !== undefined) {
@@ -182,6 +199,7 @@ export function buildRunConfig(input: RunConfigInput): RunConfigResult {
       routePath: input.routePath,
       after: input.after ?? undefined,
       before: input.before ?? undefined,
+      newestAllowed: input.newestAllowed ?? new Date(),
       content: input.content.trim() || undefined,
       pattern: input.pattern.trim() || undefined,
       hasLink: input.hasLink,
@@ -211,6 +229,7 @@ export function runConfigSignature(config: RunConfig): string {
     config.routePath,
     config.after?.getTime() ?? 0,
     config.before?.getTime() ?? 0,
+    config.newestAllowed.getTime(),
     config.content ?? '',
     config.pattern ?? '',
     config.hasLink,
@@ -274,6 +293,23 @@ export function describeTarget(config: RunConfig): string {
 }
 
 /**
+ * The newest message a run may touch.
+ *
+ * Anything posted after the config was built is out of scope, so a run started
+ * minutes after the preview cannot sweep up newer messages.
+ *
+ * @param config - The config to bound
+ * @returns The earlier of the "before" filter and the capture instant
+ */
+export function newestBoundary(config: RunConfig): Date {
+  const before = config.before;
+  if (before && before.getTime() < config.newestAllowed.getTime()) {
+    return before;
+  }
+  return config.newestAllowed;
+}
+
+/**
  * Builds the label/value pairs shown on the review screen.
  *
  * @param config - The config to describe
@@ -283,6 +319,7 @@ export function describeRunConfig(config: RunConfig): SummaryLine[] {
   const lines: SummaryLine[] = [
     { label: 'Target', value: describeTarget(config) },
     { label: 'Time range', value: `${config.timeRangeLabel} - ${describeTimeRange(config)}` },
+    { label: 'Cutoff', value: `Messages up to ${formatLocal(newestBoundary(config))}` },
   ];
 
   const filters: string[] = [];
@@ -333,9 +370,7 @@ export function engineOptionsFor(
   if (config.after) {
     options.minId = dateToSnowflake(config.after);
   }
-  if (config.before) {
-    options.maxId = dateToSnowflake(config.before);
-  }
+  options.maxId = dateToSnowflake(newestBoundary(config));
   if (config.content) {
     options.content = config.content;
   }

@@ -58,7 +58,14 @@ export async function confirmToken(
   createApiClient: ApiClientFactory,
   allowPageFallback: boolean,
 ): Promise<IdentityResult> {
-  const client = createApiClient(token);
+  let client: ApiClientPort;
+  try {
+    // The real client validates the token shape in its constructor.
+    client = createApiClient(token);
+  } catch {
+    return { ok: false, error: 'That does not look like a Discord token.' };
+  }
+
   try {
     const user = await client.getCurrentUser();
     return { ok: true, token, authorId: user.id, client };

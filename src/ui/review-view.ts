@@ -100,13 +100,13 @@ export class ReviewView {
   /**
    * Renders the counts returned by a successful preview.
    *
-   * A count qualified by filters is shown as "up to N"; a multi-channel run
-   * that only counted the first few channels is shown as "at least N".
+   * A count qualified by filters is shown as "up to N", because the client-side
+   * filters can only reduce what Discord's search reported.
    *
    * @param summary - Aggregated preview result
    */
   renderPreview(summary: PreviewSummary): void {
-    const prefix = summary.atLeast ? 'at least ' : summary.filtersApplied ? 'up to ' : '';
+    const prefix = summary.filtersApplied ? 'up to ' : '';
     this.setText('reviewCount', `${prefix}${summary.totalCount}`);
     this.setText(
       'reviewDetails',

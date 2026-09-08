@@ -7,11 +7,11 @@
  * its channels one at a time and aggregates the counters across them.
  */
 
-import { MAX_PREVIEW_CHANNELS } from './constants';
 import type {
   ApiClientFactory,
   DeletionEngineState,
   DeletionEngineStats,
+  DeletionStopReason,
   DiscordMessage,
   EngineFactory,
   EnginePort,
@@ -22,6 +22,7 @@ import type {
   StopResult,
 } from './ports';
 import { engineOptionsFor, type RunConfig } from './run-config';
+import { clearRunPlan, runPlanFor, saveRunPlan } from './run-plan';
 
 /** Cumulative message counters for a run. */
 export interface RunTotals {
@@ -60,8 +61,6 @@ export interface RunSummary extends RunTotals {
 /** Aggregated preview across every channel a run would visit. */
 export interface PreviewSummary {
   totalCount: number;
-  /** True when only some channels were counted, so the total is a lower bound. */
-  atLeast: boolean;
   filtersApplied: boolean;
   estimatedTimeMs: number;
   sampleMessages: DiscordMessage[];
@@ -123,6 +122,8 @@ export class DeletionRunner {
   private liveTotals: RunTotals = EMPTY_TOTALS;
   private position: ChannelPosition | null = null;
   private channelsCompleted = 0;
+  private legReason: DeletionStopReason | null = null;
+  private planConfig: RunConfig | null = null;
   private startedAt = 0;
   private pageHideHandler: (() => void) | null = null;
 
@@ -164,9 +165,8 @@ export class DeletionRunner {
   /**
    * Counts the messages a run would delete, without deleting anything.
    *
-   * For a multi-channel run the per-channel totals are summed for the first
-   * {@link MAX_PREVIEW_CHANNELS} channels; beyond that the result is flagged as
-   * a lower bound.
+   * Every channel the run would visit is counted: a channel that is not
+   * previewed must never be swept.
    *
    * @param token - Discord auth token
    * @param config - The immutable config the run will use
@@ -179,7 +179,7 @@ export class DeletionRunner {
     }
 
     const client = this.createApiClient(token);
-    const channels = config.channelIds.slice(0, MAX_PREVIEW_CHANNELS);
+    const channels = config.channelIds;
 
     let totalCount = 0;
     let estimatedTimeMs = 0;
@@ -200,23 +200,32 @@ export class DeletionRunner {
 
     return {
       totalCount,
-      atLeast: config.channelIds.length > channels.length,
       filtersApplied,
       estimatedTimeMs,
       sampleMessages,
       channelsCounted: channels.length,
-      channelCount: config.channelIds.length,
+      channelCount: channels.length,
     };
   }
 
   /**
    * Runs the deletion, one channel at a time.
    *
+   * A run plan is persisted for the whole channel list, so a Stop part-way
+   * through a multi-channel run can be resumed into the channels that never
+   * ran rather than the interrupted one alone.
+   *
    * @param token - Discord auth token
    * @param config - The immutable config produced at the review step
    * @param resumeFrom - Optional saved session to continue from
+   * @param baseTotals - Counters carried over from earlier legs of a resumed run
    */
-  async start(token: string, config: RunConfig, resumeFrom?: SavedProgress): Promise<void> {
+  async start(
+    token: string,
+    config: RunConfig,
+    resumeFrom?: SavedProgress,
+    baseTotals?: RunTotals,
+  ): Promise<void> {
     if (this.active) {
       return;
     }
@@ -225,14 +234,16 @@ export class DeletionRunner {
     this.paused = false;
     this.stopRequested = false;
     this.lastError = null;
-    this.baseTotals = EMPTY_TOTALS;
+    this.baseTotals = baseTotals ? { ...baseTotals } : EMPTY_TOTALS;
     this.liveTotals = EMPTY_TOTALS;
     this.channelsCompleted = 0;
     this.startedAt = Date.now();
+    this.planConfig = config;
     this.installPageHideHandler();
 
     const client = this.createApiClient(token);
     const channelCount = config.channelIds.length;
+    this.writePlan(0);
 
     try {
       for (let index = 0; index < channelCount; index++) {
@@ -254,11 +265,27 @@ export class DeletionRunner {
         if (this.lastError) {
           break;
         }
-        this.channelsCompleted++;
+        if (this.legReason === 'completed') {
+          this.channelsCompleted++;
+          this.writePlan(Math.min(index + 1, channelCount - 1));
+        }
       }
     } finally {
       this.finish(channelCount);
     }
+  }
+
+  /**
+   * Persists the plan for the run in flight, with the counters banked so far.
+   *
+   * @param index - Index of the channel the run has reached
+   */
+  private writePlan(index: number): void {
+    const config = this.planConfig;
+    if (!config) {
+      return;
+    }
+    saveRunPlan(runPlanFor(config, index, this.baseTotals));
   }
 
   private async runChannel(
@@ -271,6 +298,7 @@ export class DeletionRunner {
     const engine = this.createEngine(client);
     this.engine = engine;
     this.liveTotals = EMPTY_TOTALS;
+    this.legReason = null;
 
     engine.configure(engineOptionsFor(config, channelId, token));
     engine.setCallbacks({
@@ -322,6 +350,7 @@ export class DeletionRunner {
 
   private handleChannelStop(state: DeletionEngineState, result: StopResult | undefined): void {
     this.liveTotals = stateTotals(state);
+    this.legReason = result?.reason ?? null;
     if (result?.reason === 'stopped') {
       this.stopRequested = true;
     }
@@ -340,10 +369,17 @@ export class DeletionRunner {
         ? 'stopped'
         : 'completed';
 
+    // A stopped run keeps its plan so the remaining channels can be resumed.
+    if (reason !== 'stopped' && this.planConfig) {
+      clearRunPlan(this.planConfig.authorId);
+    }
+
     this.active = false;
     this.paused = false;
     this.engine = null;
     this.position = null;
+    this.planConfig = null;
+    this.legReason = null;
     this.removePageHideHandler();
 
     this.callbacks.onFinish?.({

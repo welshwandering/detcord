@@ -34,5 +34,10 @@ export const MINI_RING_RADIUS = 20;
  */
 export const SHOW_OLDEST_FIRST = false;
 
-/** Number of channels a multi-channel preview will actually count. */
-export const MAX_PREVIEW_CHANNELS = 10;
+/**
+ * Largest channel selection a single run accepts.
+ *
+ * Every selected channel is previewed before anything is deleted, so the
+ * selection is capped rather than the preview.
+ */
+export const MAX_SELECTED_CHANNELS = 25;
