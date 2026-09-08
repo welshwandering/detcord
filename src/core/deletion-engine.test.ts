@@ -975,6 +975,39 @@ describe('DeletionEngine', () => {
       expect(saved?.cursor.maxId).toBeDefined();
     });
 
+    it('does not advance the saved cursor past messages left unprocessed by a stop', async () => {
+      // Found by a browser run: stopping mid-page saved the page's bottom id as the
+      // cursor, so the resumed run searched below it and declared "All clean!".
+      const messages = createMessages(8);
+      const api = new FakeDiscordApi(messages);
+      const engine = new DeletionEngine(api);
+      engine.configure(defaultOptions({ deleteDelay: 1000, searchDelay: 10_000 }));
+
+      const run = engine.start();
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(api.deleteLog).toHaveLength(3);
+      engine.stop();
+      await runToCompletion(run);
+
+      const saved = engine.loadSavedSession();
+      expect(saved?.deletedCount).toBe(3);
+      const cursor = saved?.cursor.maxId;
+      const unprocessed = messages.slice(3);
+      for (const message of unprocessed) {
+        // Every unprocessed message must still fall inside the saved cursor's range.
+        expect(cursor === undefined || BigInt(message.id) <= BigInt(cursor)).toBe(true);
+      }
+
+      const resumed = new DeletionEngine(api);
+      resumed.configure(defaultOptions());
+      resumed.resumeFromSaved(saved as SavedProgress);
+      await runToCompletion(resumed.start());
+
+      expect(api.deletedIds.size).toBe(8);
+      expect(resumed.getState().deletedCount).toBe(8);
+      expect(resumed.hasSavedSession()).toBe(false);
+    });
+
     it('clears the saved session when the run completes', async () => {
       const api = new FakeDiscordApi(createMessages(2));
       const engine = new DeletionEngine(api);

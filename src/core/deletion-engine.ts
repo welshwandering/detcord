@@ -869,7 +869,8 @@ export class DeletionEngine {
       emptyPageRetries = 0;
       const next = this.advanceCursor(page, this.cursorMaxId, this.options?.minId);
       await this.processMessages(page);
-      if (next === null) return;
+      // A stop mid-page must not advance the cursor past the unprocessed remainder.
+      if (this.stopRequested || next === null) return;
       this.cursorMaxId = next;
       await this.delay(this.getSearchDelay());
     }
@@ -910,7 +911,7 @@ export class DeletionEngine {
       emptyPageRetries = 0;
       const next = this.advanceCursor(page, cursor, windowMinId);
       await this.processMessages(sortByIdAscending(page));
-      if (next === null) return;
+      if (this.stopRequested || next === null) return;
       cursor = next;
       await this.delay(this.getSearchDelay());
     }
