@@ -206,14 +206,11 @@ ${ROOT} {
 .${CSS_PREFIX}-progress-count,
 .${CSS_PREFIX}-stat-value,
 .${CSS_PREFIX}-time-value,
-.${CSS_PREFIX}-mini-percent,
 .${CSS_PREFIX}-selected-count,
 .${CSS_PREFIX}-channel-progress,
 .${CSS_PREFIX}-complete-stats,
-.${CSS_PREFIX}-complete-time,
 .${CSS_PREFIX}-option-hint,
-.${CSS_PREFIX}-waiting,
-.${CSS_PREFIX}-countdown-overlay .countdown-number {
+.${CSS_PREFIX}-waiting {
 	font-variant-numeric: tabular-nums;
 }
 
@@ -275,44 +272,6 @@ ${ROOT} {
 
 .${CSS_PREFIX}-mini-indicator:hover {
 	transform: translateY(-1px);
-}
-
-.${CSS_PREFIX}-mini-progress {
-	position: relative;
-	width: 40px;
-	height: 40px;
-}
-
-.${CSS_PREFIX}-mini-ring {
-	width: 100%;
-	height: 100%;
-	transform: rotate(-90deg);
-}
-
-.${CSS_PREFIX}-mini-ring-bg {
-	fill: none;
-	stroke: var(--${CSS_PREFIX}-line);
-	stroke-width: 3;
-}
-
-.${CSS_PREFIX}-mini-ring-fill {
-	fill: none;
-	stroke: var(--${CSS_PREFIX}-signal);
-	stroke-width: 3;
-	stroke-linecap: butt;
-	stroke-dasharray: 126;
-	stroke-dashoffset: 126;
-	transition: stroke-dashoffset var(--${CSS_PREFIX}-motion-slow) var(--${CSS_PREFIX}-ease);
-}
-
-.${CSS_PREFIX}-mini-percent {
-	position: absolute;
-	top: 50%;
-	left: 50%;
-	transform: translate(-50%, -50%);
-	font-size: var(--${CSS_PREFIX}-text-1);
-	font-weight: 600;
-	color: var(--${CSS_PREFIX}-ink);
 }
 
 /* ============================================
@@ -569,30 +528,6 @@ ${ROOT} {
 .${CSS_PREFIX}-card.selected .${CSS_PREFIX}-card-title,
 .${CSS_PREFIX}-option.selected .${CSS_PREFIX}-option-label {
 	font-weight: 600;
-}
-
-.${CSS_PREFIX}-option-radio {
-	width: 14px;
-	height: 14px;
-	border: 1px solid var(--${CSS_PREFIX}-line);
-	border-radius: 50%;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	flex-shrink: 0;
-	transition: border-color var(--${CSS_PREFIX}-motion) var(--${CSS_PREFIX}-ease);
-}
-
-.${CSS_PREFIX}-option.selected .${CSS_PREFIX}-option-radio {
-	border-color: var(--${CSS_PREFIX}-signal);
-}
-
-.${CSS_PREFIX}-option.selected .${CSS_PREFIX}-option-radio::after {
-	content: '';
-	width: 6px;
-	height: 6px;
-	background: var(--${CSS_PREFIX}-signal);
-	border-radius: 50%;
 }
 
 .${CSS_PREFIX}-option-label {
@@ -867,14 +802,6 @@ ${ROOT} {
 	text-overflow: ellipsis;
 }
 
-.${CSS_PREFIX}-channel-category {
-	font-size: var(--${CSS_PREFIX}-text-1);
-	font-weight: 500;
-	letter-spacing: 0.04em;
-	color: var(--${CSS_PREFIX}-ink-2);
-	padding: var(--${CSS_PREFIX}-space-2) var(--${CSS_PREFIX}-space-3) var(--${CSS_PREFIX}-space-1);
-}
-
 .${CSS_PREFIX}-channel-loading {
 	display: flex;
 	align-items: center;
@@ -1077,28 +1004,6 @@ ${ROOT} {
 	cursor: not-allowed;
 }
 
-/* ============================================
-   Running screen
-   ============================================ */
-
-.${CSS_PREFIX}-status-speaker {
-	display: flex;
-	align-items: center;
-	margin-bottom: var(--${CSS_PREFIX}-space-4);
-}
-
-.${CSS_PREFIX}-speaker-avatar {
-	display: none;
-}
-
-.${CSS_PREFIX}-speaker-bubble {
-	flex: 1;
-	background: transparent;
-	border: none;
-	border-radius: 0;
-	padding: 0;
-}
-
 .${CSS_PREFIX}-status-message {
 	font-size: var(--${CSS_PREFIX}-text-2);
 	color: var(--${CSS_PREFIX}-ink-2);
@@ -1123,41 +1028,10 @@ ${ROOT} {
 	padding: var(--${CSS_PREFIX}-space-2) 0 0;
 }
 
-.${CSS_PREFIX}-progress-ring-container {
-	position: relative;
-	width: 140px;
-	height: 140px;
-	margin-bottom: var(--${CSS_PREFIX}-space-4);
-}
-
 .${CSS_PREFIX}-progress-ring {
 	width: 100%;
 	height: 100%;
 	transform: rotate(-90deg);
-}
-
-.${CSS_PREFIX}-progress-ring-bg {
-	fill: none;
-	stroke: var(--${CSS_PREFIX}-line);
-	stroke-width: 4;
-}
-
-.${CSS_PREFIX}-progress-ring-fill {
-	fill: none;
-	stroke: var(--${CSS_PREFIX}-signal);
-	stroke-width: 4;
-	stroke-linecap: butt;
-	stroke-dasharray: 377;
-	stroke-dashoffset: 377;
-	transition: stroke-dashoffset var(--${CSS_PREFIX}-motion-slow) var(--${CSS_PREFIX}-ease);
-}
-
-.${CSS_PREFIX}-progress-ring-text {
-	position: absolute;
-	top: 50%;
-	left: 50%;
-	transform: translate(-50%, -50%);
-	text-align: center;
 }
 
 .${CSS_PREFIX}-progress-percent {
@@ -1256,25 +1130,6 @@ ${ROOT} {
 	transition: width var(--${CSS_PREFIX}-motion-slow) var(--${CSS_PREFIX}-ease);
 }
 
-.${CSS_PREFIX}-current-message {
-	width: 100%;
-	margin-top: var(--${CSS_PREFIX}-space-3);
-	font-size: var(--${CSS_PREFIX}-text-1);
-	color: var(--${CSS_PREFIX}-ink-2);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-
-.${CSS_PREFIX}-current-message.${CSS_PREFIX}-status-searching {
-	animation: ${CSS_PREFIX}-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes ${CSS_PREFIX}-pulse {
-	0%, 100% { opacity: 0.65; }
-	50% { opacity: 1; }
-}
-
 .${CSS_PREFIX}-waiting {
 	display: flex;
 	align-items: center;
@@ -1287,19 +1142,6 @@ ${ROOT} {
 	background: transparent;
 	color: var(--${CSS_PREFIX}-ink-2);
 	font-size: var(--${CSS_PREFIX}-text-1);
-}
-
-.${CSS_PREFIX}-spinner {
-	width: 12px;
-	height: 12px;
-	border: 1px solid var(--${CSS_PREFIX}-line);
-	border-top-color: var(--${CSS_PREFIX}-signal);
-	border-radius: 50%;
-	animation: ${CSS_PREFIX}-spin 0.8s linear infinite;
-}
-
-@keyframes ${CSS_PREFIX}-spin {
-	to { transform: rotate(360deg); }
 }
 
 /* ============================================
@@ -1341,11 +1183,6 @@ ${ROOT} {
 	font-style: italic;
 }
 
-.${CSS_PREFIX}-feed-entry .${CSS_PREFIX}-feed-text {
-	color: var(--${CSS_PREFIX}-ink);
-	font-style: normal;
-}
-
 /* ============================================
    Completion, errors, prompts
    ============================================ */
@@ -1370,12 +1207,6 @@ ${ROOT} {
 .${CSS_PREFIX}-complete-stats {
 	font-size: var(--${CSS_PREFIX}-text-2);
 	color: var(--${CSS_PREFIX}-ink);
-}
-
-.${CSS_PREFIX}-complete-time {
-	font-size: var(--${CSS_PREFIX}-text-1);
-	color: var(--${CSS_PREFIX}-ink-2);
-	margin-top: var(--${CSS_PREFIX}-space-1);
 }
 
 .${CSS_PREFIX}-complete-detail {
@@ -1453,41 +1284,6 @@ ${ROOT} {
 	margin-top: 0;
 }
 
-/* ============================================
-   Countdown, and the effects being retired
-   ============================================ */
-
-.${CSS_PREFIX}-countdown-overlay {
-	position: absolute;
-	inset: 0;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	background: var(--${CSS_PREFIX}-ground);
-	border-radius: var(--${CSS_PREFIX}-radius-window);
-	z-index: 100;
-}
-
-.${CSS_PREFIX}-countdown-overlay .countdown-number {
-	font-size: var(--${CSS_PREFIX}-text-hero);
-	font-weight: 700;
-	letter-spacing: -0.02em;
-	color: var(--${CSS_PREFIX}-ink);
-	animation: ${CSS_PREFIX}-countdown-in var(--${CSS_PREFIX}-motion) var(--${CSS_PREFIX}-ease);
-}
-
-.${CSS_PREFIX}-countdown-overlay .countdown-boom {
-	font-size: var(--${CSS_PREFIX}-text-4);
-	font-weight: 600;
-	color: var(--${CSS_PREFIX}-signal-ink);
-	animation: ${CSS_PREFIX}-countdown-in var(--${CSS_PREFIX}-motion) var(--${CSS_PREFIX}-ease);
-}
-
-@keyframes ${CSS_PREFIX}-countdown-in {
-	from { opacity: 0; }
-	to { opacity: 1; }
-}
-
 /* Shake and flash are no-ops: the class names stay so the effects module
    keeps working until its calls are removed. */
 .${CSS_PREFIX}-window.shaking,
@@ -1495,14 +1291,7 @@ ${ROOT} {
 	animation: none;
 }
 
-@keyframes ${CSS_PREFIX}-shake { from { transform: none; } to { transform: none; } }
-@keyframes ${CSS_PREFIX}-flash { from { opacity: 0; } to { opacity: 0; } }
-
 .${CSS_PREFIX}-window .flash-overlay {
-	display: none;
-}
-
-.${CSS_PREFIX}-confetti-container {
 	display: none;
 }
 
@@ -1513,11 +1302,6 @@ ${ROOT} {
 @container ${CSS_PREFIX}-window (max-width: 400px) {
 	.${CSS_PREFIX}-window {
 		--${CSS_PREFIX}-pad: var(--${CSS_PREFIX}-space-3);
-	}
-
-	.${CSS_PREFIX}-progress-ring-container {
-		width: 112px;
-		height: 112px;
 	}
 
 	.${CSS_PREFIX}-progress-stats,
