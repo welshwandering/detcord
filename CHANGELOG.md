@@ -32,6 +32,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 - Made Stop cancel the Discord request in flight through an `AbortSignal` instead of waiting for it to settle; the cancelled message is counted neither deleted nor failed.
 - Held the resume prompt and the delete button back until the page has answered which account it shows, so a prompt left over from a previous open cannot start a run under a stale identity.
 - Rewrote the saved run plan whenever a run stops or fails, so a channel that ran for longer than a day no longer leaves a fresh checkpoint beside an expired plan.
+- Keyed saved checkpoints by run as well as by target, so starting a second run over a channel no longer erases a stopped run's checkpoint and its queued channels.
 
 ### Changed
 
