@@ -1211,7 +1211,7 @@ export class DeletionEngine {
   /** Waits out an exhausted bucket before spending another request on it. */
   private async respectRateLimitHeader(): Promise<void> {
     const info = this.apiClient.getRateLimitInfo();
-    if (!info || info.remaining !== 0) {
+    if (info?.remaining !== 0) {
       return;
     }
     const resetAfter = info.resetAfter;
