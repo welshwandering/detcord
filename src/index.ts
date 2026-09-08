@@ -10,9 +10,6 @@
  * - Use at your own risk. The authors are not responsible for any consequences.
  */
 
-// Declare GM_info for TypeScript (must come before usage)
-declare const GM_info: unknown;
-
 // Build-time flag for development mode (injected by Vite)
 declare const __DEV__: boolean;
 
@@ -183,16 +180,5 @@ export function destroy(): void {
   // Clean up debug API if it was exposed
   if (typeof __DEV__ !== 'undefined' && __DEV__) {
     (window as unknown as Record<string, unknown>).Detcord = undefined;
-  }
-}
-
-// Auto-initialize when loaded as a userscript
-if (typeof window !== 'undefined' && typeof GM_info !== 'undefined') {
-  // Running as a userscript
-  // Wait for Discord to be ready before initializing
-  if (document.readyState === 'complete') {
-    init();
-  } else {
-    window.addEventListener('load', init);
   }
 }

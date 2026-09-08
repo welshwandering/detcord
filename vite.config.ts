@@ -46,7 +46,7 @@ export default defineConfig(({ mode }) => ({
     target: 'es2022',
     outDir: 'dist',
     lib: {
-      entry: 'src/index.ts',
+      entry: mode === 'userscript' ? 'src/userscript.ts' : 'src/index.ts',
       name: 'Detcord',
       formats: mode === 'userscript' ? ['iife'] : ['es', 'iife'],
       fileName: (format) => (format === 'iife' ? 'detcord.user.js' : `detcord.${format}.js`),
