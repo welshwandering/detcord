@@ -43,7 +43,8 @@
       "!**/.archive",
       "!**/dist",
       "!**/node_modules",
-      "!**/coverage"
+      "!**/coverage",
+      "!**/.playwright-mcp"
     ]
   }
 }
