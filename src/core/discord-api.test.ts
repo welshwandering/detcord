@@ -120,6 +120,133 @@ describe('DiscordApiClient', () => {
       expect(init.method).toBe('DELETE');
       expect(init.headers).toEqual({ Authorization: TEST_TOKEN });
     });
+
+    it('should omit the signal when the caller supplies none', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse({ status: 204 }));
+
+      await client.deleteMessage(TEST_CHANNEL_ID, TEST_MESSAGE_ID);
+
+      const init = mockFetch.mock.calls[0]?.[1] as RequestInit;
+      expect(init.signal).toBeUndefined();
+    });
+  });
+
+  describe('cancellation', () => {
+    /** The rejection a real `fetch` produces for a cancelled request. */
+    function abortError(): DOMException {
+      return new DOMException('The user aborted a request.', 'AbortError');
+    }
+
+    /** Stubs `fetch` with the abort behaviour a real implementation has. */
+    function stubAbortableFetch(): void {
+      mockFetch.mockImplementation((_url: string, init: RequestInit) => {
+        const signal = init.signal ?? undefined;
+        if (signal?.aborted) {
+          return Promise.reject(abortError());
+        }
+        return new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(abortError()), { once: true });
+        });
+      });
+    }
+
+    /** One request per method, each with the response its success path needs. */
+    const requests: Array<{
+      name: string;
+      response: () => Response;
+      run: (client: DiscordApiClient, signal?: AbortSignal) => Promise<unknown>;
+    }> = [
+      {
+        name: 'searchMessages',
+        response: () => makeResponse({ status: 200, body: { messages: [], total_results: 0 } }),
+        run: (target, signal) => target.searchMessages({ guildId: TEST_GUILD_ID }, signal),
+      },
+      {
+        name: 'deleteMessage',
+        response: () => makeResponse({ status: 204 }),
+        run: (target, signal) => target.deleteMessage(TEST_CHANNEL_ID, TEST_MESSAGE_ID, signal),
+      },
+      {
+        name: 'getCurrentUser',
+        response: () => makeResponse({ status: 200, body: { id: TEST_AUTHOR_ID } }),
+        run: (target, signal) => target.getCurrentUser(signal),
+      },
+      {
+        name: 'getGuildChannels',
+        response: () => makeResponse({ status: 200, body: [] }),
+        run: (target, signal) => target.getGuildChannels(TEST_GUILD_ID, signal),
+      },
+    ];
+
+    it.each(requests.map((request) => [request.name, request] as const))(
+      'should forward the caller signal to fetch from %s',
+      async (_name, request) => {
+        mockFetch.mockResolvedValueOnce(request.response());
+        const controller = new AbortController();
+
+        await request.run(client, controller.signal);
+
+        const init = mockFetch.mock.calls[0]?.[1] as RequestInit;
+        expect(init.signal).toBe(controller.signal);
+      },
+    );
+
+    it.each(requests.map((request) => [request.name, request] as const))(
+      'should throw ABORTED from %s when the signal has already fired',
+      async (_name, request) => {
+        stubAbortableFetch();
+        const controller = new AbortController();
+        controller.abort();
+
+        const error = await captureError(() => request.run(client, controller.signal));
+
+        expect(error.code).toBe('ABORTED');
+        expect(error.message).toBe('Request aborted');
+        expect(error.isRetryable).toBe(false);
+      },
+    );
+
+    it('should throw ABORTED when the signal fires mid-flight', async () => {
+      stubAbortableFetch();
+      const controller = new AbortController();
+
+      const pending = captureError(() =>
+        client.deleteMessage(TEST_CHANNEL_ID, TEST_MESSAGE_ID, controller.signal),
+      );
+      controller.abort();
+      const error = await pending;
+
+      expect(error.code).toBe('ABORTED');
+      expect(error.isRetryable).toBe(false);
+      expect(error.cause).toBeInstanceOf(DOMException);
+    });
+
+    it('should treat a rejection racing the abort as ABORTED', async () => {
+      const controller = new AbortController();
+      mockFetch.mockImplementationOnce(() => {
+        controller.abort();
+        return Promise.reject(new TypeError('Failed to fetch'));
+      });
+
+      const error = await captureError(() =>
+        client.searchMessages({ guildId: TEST_GUILD_ID }, controller.signal),
+      );
+
+      expect(error.code).toBe('ABORTED');
+    });
+
+    it('should still throw NETWORK_ERROR when a live signal is attached', async () => {
+      const controller = new AbortController();
+      mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+
+      const error = await captureError(() =>
+        client.searchMessages({ guildId: TEST_GUILD_ID }, controller.signal),
+      );
+
+      expect(error.code).toBe('NETWORK_ERROR');
+      expect(error.isRetryable).toBe(true);
+      expect(controller.signal.aborted).toBe(false);
+    });
   });
 
   describe('getRateLimitInfo', () => {

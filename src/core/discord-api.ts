@@ -235,6 +235,37 @@ function unexpectedShape(response: Response): DiscordApiError {
   });
 }
 
+/**
+ * Whether a `fetch` rejection was the caller cancelling the request.
+ *
+ * Browsers reject with a `DOMException` named `AbortError`, but a signal that
+ * has already fired is treated as an abort whatever the rejection looked like,
+ * so a transport error racing the cancellation is not retried either.
+ */
+function isAbortRejection(err: unknown, signal: AbortSignal | undefined): boolean {
+  if (err instanceof Error && err.name === 'AbortError') {
+    return true;
+  }
+  return signal?.aborted === true;
+}
+
+/**
+ * Classifies a `fetch` rejection.
+ *
+ * An abort is not a transport failure: the caller has stopped the run, so the
+ * error is non-retryable `ABORTED` rather than retryable `NETWORK_ERROR`.
+ */
+function requestFailure(err: unknown, signal: AbortSignal | undefined): DiscordApiError {
+  if (isAbortRejection(err, signal)) {
+    return new DiscordApiError('ABORTED', 'Request aborted', { cause: err });
+  }
+  return new DiscordApiError(
+    'NETWORK_ERROR',
+    err instanceof Error ? err.message : 'Network request failed',
+    { cause: err },
+  );
+}
+
 /** Whether a parsed body carries the two fields a search response must have. */
 function isSearchResponse(data: unknown): data is SearchResponse {
   if (typeof data !== 'object' || data === null) {
@@ -425,15 +456,16 @@ export class DiscordApiClient {
   /**
    * Search for messages in a guild or channel
    * @param params Search parameters
+   * @param signal Optional signal; aborting it rejects with code `ABORTED`
    * @returns Search response with messages and total count
    * @throws DiscordApiError on any failure, including `INDEXING` for HTTP 202
    */
-  async searchMessages(params: SearchParams): Promise<SearchResponse> {
+  async searchMessages(params: SearchParams, signal?: AbortSignal): Promise<SearchResponse> {
     const endpoint = searchEndpointFor(params.guildId, params.channelId);
     const queryString = buildSearchQuery(params);
     const url = queryString ? `${endpoint}?${queryString}` : endpoint;
 
-    const response = await this.makeRequest(url, 'GET');
+    const response = await this.makeRequest(url, 'GET', signal);
 
     if (response.status === HTTP_INDEXING) {
       throw await errorForResponse(response, {
@@ -456,10 +488,15 @@ export class DiscordApiClient {
    * Delete a specific message
    * @param channelId Channel containing the message
    * @param messageId ID of the message to delete
+   * @param signal Optional signal; aborting it rejects with code `ABORTED`
    * @returns `deleted` on HTTP 204, `already_gone` on HTTP 404
    * @throws DiscordApiError for invalid input and every other response
    */
-  async deleteMessage(channelId: string, messageId: string): Promise<DeleteOutcome> {
+  async deleteMessage(
+    channelId: string,
+    messageId: string,
+    signal?: AbortSignal,
+  ): Promise<DeleteOutcome> {
     if (!channelId || !messageId) {
       throw new DiscordApiError('UNKNOWN', 'channelId and messageId are required');
     }
@@ -471,7 +508,7 @@ export class DiscordApiClient {
     }
 
     const url = `${BASE_URL}/channels/${channelId}/messages/${messageId}`;
-    const response = await this.makeRequest(url, 'DELETE');
+    const response = await this.makeRequest(url, 'DELETE', signal);
 
     if (response.status === HTTP_NO_CONTENT) {
       return 'deleted';
@@ -485,11 +522,12 @@ export class DiscordApiClient {
   /**
    * Fetch the account the current token belongs to.
    *
+   * @param signal - Optional signal; aborting it rejects with code `ABORTED`
    * @returns The authenticated user's ID, username and global name
    * @throws DiscordApiError; `UNAUTHORIZED` when the token is invalid
    */
-  async getCurrentUser(): Promise<CurrentUser> {
-    const response = await this.makeRequest(`${BASE_URL}/users/@me`, 'GET');
+  async getCurrentUser(signal?: AbortSignal): Promise<CurrentUser> {
+    const response = await this.makeRequest(`${BASE_URL}/users/@me`, 'GET', signal);
 
     if (!response.ok) {
       throw await errorForResponse(response);
@@ -515,10 +553,11 @@ export class DiscordApiClient {
   /**
    * Get all channels in a guild
    * @param guildId The guild ID to fetch channels from
+   * @param signal Optional signal; aborting it rejects with code `ABORTED`
    * @returns Array of channels (filtered to text-based channels)
    * @throws DiscordApiError on invalid input or any failed request
    */
-  async getGuildChannels(guildId: string): Promise<DiscordChannel[]> {
+  async getGuildChannels(guildId: string, signal?: AbortSignal): Promise<DiscordChannel[]> {
     if (!guildId) {
       throw new DiscordApiError('UNKNOWN', 'guildId is required');
     }
@@ -526,7 +565,11 @@ export class DiscordApiClient {
       throw new DiscordApiError('UNKNOWN', 'Invalid guild ID format');
     }
 
-    const response = await this.makeRequest(`${BASE_URL}/guilds/${guildId}/channels`, 'GET');
+    const response = await this.makeRequest(
+      `${BASE_URL}/guilds/${guildId}/channels`,
+      'GET',
+      signal,
+    );
 
     if (!response.ok) {
       throw await errorForResponse(response);
@@ -542,21 +585,28 @@ export class DiscordApiClient {
   /**
    * Make an authenticated request to the Discord API.
    *
-   * Neither GET nor DELETE carries a body, so no `Content-Type` is sent.
+   * Neither GET nor DELETE carries a body, so no `Content-Type` is sent. The
+   * caller's signal, when given, reaches `fetch` itself, so a Stop cancels the
+   * request in flight instead of waiting for it to settle.
    */
-  private async makeRequest(url: string, method: 'GET' | 'DELETE'): Promise<Response> {
+  private async makeRequest(
+    url: string,
+    method: 'GET' | 'DELETE',
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    const init: RequestInit = {
+      method,
+      headers: { Authorization: this.token },
+    };
+    if (signal) {
+      init.signal = signal;
+    }
+
     let response: Response;
     try {
-      response = await fetch(url, {
-        method,
-        headers: { Authorization: this.token },
-      });
+      response = await fetch(url, init);
     } catch (err) {
-      throw new DiscordApiError(
-        'NETWORK_ERROR',
-        err instanceof Error ? err.message : 'Network request failed',
-        { cause: err },
-      );
+      throw requestFailure(err, signal);
     }
 
     this.updateRateLimitInfo(response.headers);

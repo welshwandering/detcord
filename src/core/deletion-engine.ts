@@ -66,9 +66,13 @@ export type DeletionStopReason = 'completed' | 'stopped' | 'error';
  */
 export interface DiscordApiClient {
   /** Searches messages; throws a {@link DiscordApiError} on any failure. */
-  searchMessages(params: SearchParams): Promise<SearchResponse>;
+  searchMessages(params: SearchParams, signal?: AbortSignal): Promise<SearchResponse>;
   /** Deletes one message; resolves `already_gone` for a 404. */
-  deleteMessage(channelId: string, messageId: string): Promise<'deleted' | 'already_gone'>;
+  deleteMessage(
+    channelId: string,
+    messageId: string,
+    signal?: AbortSignal,
+  ): Promise<'deleted' | 'already_gone'>;
   /** Latest rate limit headers, or null when none have been seen. */
   getRateLimitInfo(): RateLimitInfo | null;
 }
@@ -401,6 +405,16 @@ function failureOutcome(error: DiscordApiError): MessageOutcome {
   return { status: 'failed', reason: error.message, code: error.code };
 }
 
+/**
+ * Whether a failure is this run's own Stop cancelling an in-flight request.
+ *
+ * An abort is neither an error nor something to retry: the caller asked the
+ * run to end, so the loops unwind exactly as they do for any other Stop.
+ */
+function isAbortedFailure(error: unknown): boolean {
+  return DiscordApiError.is(error) && error.code === 'ABORTED';
+}
+
 /** Generates an identifier unique enough to correlate a resumed run. */
 export function createRunId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -564,8 +578,10 @@ export class DeletionEngine {
   /**
    * Stops the deletion process.
    *
-   * Any in-flight wait (search delay, rate limit wait, backoff) is aborted, so
-   * the run unwinds immediately rather than at the end of the current timer.
+   * Aborting the run's `AbortController` ends both the engine's own waits
+   * (search delay, rate limit wait, backoff) and the request currently in
+   * flight, so the run unwinds immediately rather than at the end of the
+   * current timer or whenever a stalled connection happens to settle.
    */
   stop(): void {
     this.stopRequested = true;
@@ -610,7 +626,10 @@ export class DeletionEngine {
     }
     this.assertConfigured();
 
-    const response = await this.apiClient.searchMessages(this.buildSearchParams({}));
+    const response = await this.apiClient.searchMessages(
+      this.buildSearchParams({}),
+      this.requestSignal(),
+    );
     const messages = extractHits(response);
     const deletable = messages.filter((message) => this.classifyExclusion(message) === null);
 
@@ -1097,7 +1116,7 @@ export class DeletionEngine {
           return [];
         }
         const started = Date.now();
-        const response = await this.apiClient.searchMessages(params);
+        const response = await this.apiClient.searchMessages(params, this.requestSignal());
         this.recordPing(Date.now() - started);
         this.setStatus(undefined);
         if (trackTotals) {
@@ -1105,6 +1124,9 @@ export class DeletionEngine {
         }
         return extractHits(response);
       } catch (error) {
+        if (isAbortedFailure(error)) {
+          return [];
+        }
         await this.handleSearchFailure(error, budget);
       }
     }
@@ -1172,7 +1194,11 @@ export class DeletionEngine {
           return null;
         }
         const started = Date.now();
-        const result = await this.apiClient.deleteMessage(message.channel_id, message.id);
+        const result = await this.apiClient.deleteMessage(
+          message.channel_id,
+          message.id,
+          this.requestSignal(),
+        );
         this.recordPing(Date.now() - started);
         if (result === 'already_gone') {
           return { status: 'already_gone' };
@@ -1180,6 +1206,9 @@ export class DeletionEngine {
         this.handleSuccessfulDeletion();
         return { status: 'deleted' };
       } catch (error) {
+        if (isAbortedFailure(error)) {
+          return null;
+        }
         const outcome = await this.handleDeleteFailure(error, budget);
         if (outcome) {
           return outcome;
@@ -1262,6 +1291,17 @@ export class DeletionEngine {
   private async readyForRequest(): Promise<boolean> {
     await this.waitWhilePaused();
     return !this.stopRequested;
+  }
+
+  /**
+   * The signal tying an in-flight request to this run.
+   *
+   * `stop()` aborts the controller, so the request is cancelled rather than
+   * left to settle in its own time. Outside a run there is no controller and
+   * the request is issued without a signal.
+   */
+  private requestSignal(): AbortSignal | undefined {
+    return this.abortController?.signal;
   }
 
   /** Waits out an exhausted bucket before spending another request on it. */

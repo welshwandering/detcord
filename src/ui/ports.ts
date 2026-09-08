@@ -79,13 +79,15 @@ export interface EnginePort {
  * The slice of the Discord API client the UI and the engine depend on.
  *
  * It includes the engine's needs (`deleteMessage`, `getRateLimitInfo`) so one
- * client instance can be handed straight to `new DeletionEngine()`.
+ * client instance can be handed straight to `new DeletionEngine()`. Every
+ * request method takes an optional trailing `AbortSignal`, which the client
+ * hands to `fetch`; aborting it rejects the call with code `ABORTED`.
  */
 export interface ApiClientPort {
-  getCurrentUser(): Promise<CurrentUser>;
-  getGuildChannels(guildId: string): Promise<DiscordChannel[]>;
-  searchMessages(params: SearchParams): Promise<SearchResponse>;
-  deleteMessage(channelId: string, messageId: string): Promise<DeleteOutcome>;
+  getCurrentUser(signal?: AbortSignal): Promise<CurrentUser>;
+  getGuildChannels(guildId: string, signal?: AbortSignal): Promise<DiscordChannel[]>;
+  searchMessages(params: SearchParams, signal?: AbortSignal): Promise<SearchResponse>;
+  deleteMessage(channelId: string, messageId: string, signal?: AbortSignal): Promise<DeleteOutcome>;
   getRateLimitInfo(): RateLimitInfo | null;
 }
 

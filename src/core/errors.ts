@@ -21,6 +21,8 @@ export const DISCORD_ERROR_THREAD_ARCHIVED = 50083;
  * - `NOT_FOUND`     HTTP 404; the resource is gone.
  * - `NETWORK_ERROR` `fetch` rejected before a response arrived.
  * - `SERVER_ERROR`  HTTP 5xx.
+ * - `ABORTED`       The caller's `AbortSignal` cancelled the request. Never
+ *   retry: the run is being stopped, so the request is not meant to succeed.
  * - `UNKNOWN`       Anything else; `httpStatus` is set when a response existed.
  */
 export type DiscordApiErrorCode =
@@ -31,6 +33,7 @@ export type DiscordApiErrorCode =
   | 'NOT_FOUND'
   | 'NETWORK_ERROR'
   | 'SERVER_ERROR'
+  | 'ABORTED'
   | 'UNKNOWN';
 
 /** Codes for which a retry after a delay is reasonable. */
@@ -51,7 +54,7 @@ export interface DiscordApiErrorOptions {
   global?: boolean;
   /** Discord's JSON error `code`, when the body carried one (e.g. 50083). */
   discordCode?: number;
-  /** Underlying error, for network failures. */
+  /** Underlying error, for network failures and aborts. */
   cause?: unknown;
 }
 

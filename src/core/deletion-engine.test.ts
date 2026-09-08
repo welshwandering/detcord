@@ -93,6 +93,22 @@ function createMemoryStorage(): Storage {
 type FailureScript = Array<Error | null>;
 
 /**
+ * Models a request that never arrives: it settles only when its signal fires,
+ * rejecting with the `ABORTED` error the real client produces for a cancelled
+ * `fetch`. Without a signal it never settles at all, so an engine that fails
+ * to pass one hangs and `runToCompletion` reports it.
+ */
+function stallUntilAborted<T>(signal: AbortSignal | undefined): Promise<T> {
+  return new Promise<T>((_resolve, reject) => {
+    signal?.addEventListener(
+      'abort',
+      () => reject(new DiscordApiError('ABORTED', 'Request aborted')),
+      { once: true },
+    );
+  });
+}
+
+/**
  * Stub Discord API that models a real message store, so cursor pagination is
  * genuinely exercised rather than replayed from a fixed list of pages.
  */
@@ -102,6 +118,12 @@ class FakeDiscordApi implements DiscordApiClient {
   readonly alreadyGoneIds = new Set<string>();
   readonly searchLog: SearchParams[] = [];
   readonly deleteLog: string[] = [];
+  readonly searchSignals: Array<AbortSignal | undefined> = [];
+  readonly deleteSignals: Array<AbortSignal | undefined> = [];
+  /** Searches to serve before later ones stall; null means never stall. */
+  stallSearchesAfter: number | null = null;
+  /** Deletes to serve before later ones stall; null means never stall. */
+  stallDeletesAfter: number | null = null;
   searchFailures: FailureScript = [];
   deleteFailures: FailureScript = [];
   pageSize = 25;
@@ -116,8 +138,12 @@ class FakeDiscordApi implements DiscordApiClient {
     return this.searchLog.length;
   }
 
-  async searchMessages(params: SearchParams): Promise<SearchResponse> {
+  async searchMessages(params: SearchParams, signal?: AbortSignal): Promise<SearchResponse> {
     this.searchLog.push({ ...params });
+    this.searchSignals.push(signal);
+    if (this.stallSearchesAfter !== null && this.searchLog.length > this.stallSearchesAfter) {
+      return stallUntilAborted<SearchResponse>(signal);
+    }
     const failure = this.searchFailures.shift();
     if (failure) {
       throw failure;
@@ -135,8 +161,16 @@ class FakeDiscordApi implements DiscordApiClient {
     };
   }
 
-  async deleteMessage(_channelId: string, messageId: string): Promise<'deleted' | 'already_gone'> {
+  async deleteMessage(
+    _channelId: string,
+    messageId: string,
+    signal?: AbortSignal,
+  ): Promise<'deleted' | 'already_gone'> {
     this.deleteLog.push(messageId);
+    this.deleteSignals.push(signal);
+    if (this.stallDeletesAfter !== null && this.deleteLog.length > this.stallDeletesAfter) {
+      return stallUntilAborted<'deleted' | 'already_gone'>(signal);
+    }
     const failure = this.deleteFailures.shift();
     if (failure) {
       throw failure;
@@ -955,6 +989,138 @@ describe('DeletionEngine', () => {
 
       expect(api.deleteLog).toHaveLength(1);
       expect(engine.getState().deletedCount).toBe(1);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Stop cancels the request in flight, not just the waits between requests
+  // ---------------------------------------------------------------------------
+
+  describe('stop with a request in flight', () => {
+    /** Advances far enough for the abort to unwind, but not for any retry. */
+    async function settleStop(): Promise<void> {
+      await vi.advanceTimersByTimeAsync(1);
+    }
+
+    it('hands every request the run signal that Stop aborts', async () => {
+      // Mutation guard: an engine that omits the signal records `undefined`
+      // here, and nothing below can hold.
+      const api = new FakeDiscordApi(createMessages(2));
+      const engine = new DeletionEngine(api);
+      engine.configure(defaultOptions({ searchDelay: 10_000, deleteDelay: 10_000 }));
+
+      const run = engine.start();
+      await vi.advanceTimersByTimeAsync(5);
+
+      const searchSignal = api.searchSignals[0];
+      expect(searchSignal).toBeInstanceOf(AbortSignal);
+      expect(api.deleteSignals[0]).toBe(searchSignal);
+      expect(searchSignal?.aborted).toBe(false);
+
+      engine.stop();
+      expect(searchSignal?.aborted).toBe(true);
+
+      await runToCompletion(run);
+    });
+
+    it('abandons a stalled delete instead of waiting for it to settle', async () => {
+      // Reproduction: the signal never reached fetch, so Stop ended the timer
+      // waits but left the run parked on the in-flight DELETE.
+      const api = new FakeDiscordApi(createMessages(3));
+      api.stallDeletesAfter = 1;
+      const stops: DeletionStopReason[] = [];
+      const errors: Error[] = [];
+      const engine = new DeletionEngine(api);
+      engine.setCallbacks({
+        onStop: (_s, _st, result) => stops.push(result.reason),
+        onError: (error) => errors.push(error),
+      });
+      engine.configure(defaultOptions({ searchDelay: 10_000 }));
+
+      let settled = false;
+      const run = engine.start().then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(5);
+      expect(api.deleteLog).toHaveLength(2);
+      expect(engine.getState().running).toBe(true);
+
+      engine.stop();
+      await settleStop();
+
+      expect(settled).toBe(true);
+      expect(engine.getState().running).toBe(false);
+      expect(stops).toEqual(['stopped']);
+      expect(errors).toEqual([]);
+
+      // The aborted message is neither deleted nor failed nor skipped.
+      const state = engine.getState();
+      expect(state.deletedCount).toBe(1);
+      expect(state.failedCount).toBe(0);
+      expect(state.skippedCount).toBe(0);
+
+      const saved = engine.loadSavedSession() as SavedProgress;
+      expect(saved.deletedCount).toBe(1);
+      await run;
+    });
+
+    it('deletes the abandoned message once when the run is resumed', async () => {
+      const api = new FakeDiscordApi(createMessages(3));
+      api.stallDeletesAfter = 1;
+      const engine = new DeletionEngine(api);
+      engine.configure(defaultOptions({ searchDelay: 10_000 }));
+
+      const run = engine.start();
+      await vi.advanceTimersByTimeAsync(5);
+      engine.stop();
+      await runToCompletion(run);
+
+      const saved = engine.loadSavedSession() as SavedProgress;
+      api.stallDeletesAfter = null;
+
+      const resumed = new DeletionEngine(api);
+      resumed.configure(defaultOptions());
+      resumed.resumeFromSaved(saved);
+      await runToCompletion(resumed.start());
+
+      expect(api.deletedIds.size).toBe(3);
+      expect(resumed.getState().deletedCount).toBe(3);
+      expect(resumed.getState().failedCount).toBe(0);
+      expect(resumed.getState().skippedCount).toBe(0);
+    });
+
+    it('abandons a stalled search instead of waiting for it to settle', async () => {
+      const api = new FakeDiscordApi(createMessages(3));
+      api.stallSearchesAfter = 0;
+      const stops: DeletionStopReason[] = [];
+      const errors: Error[] = [];
+      const engine = new DeletionEngine(api);
+      engine.setCallbacks({
+        onStop: (_s, _st, result) => stops.push(result.reason),
+        onError: (error) => errors.push(error),
+      });
+      engine.configure(defaultOptions());
+
+      let settled = false;
+      const run = engine.start().then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(5);
+      expect(api.searchLog).toHaveLength(1);
+      expect(engine.getState().running).toBe(true);
+
+      engine.stop();
+      await settleStop();
+
+      expect(settled).toBe(true);
+      expect(engine.getState().running).toBe(false);
+      expect(stops).toEqual(['stopped']);
+      expect(errors).toEqual([]);
+      // An abort is not an empty page: no retry search is issued.
+      expect(api.searchLog).toHaveLength(1);
+      expect(api.deleteLog).toHaveLength(0);
+      expect(engine.loadSavedSession()).not.toBeNull();
+      await run;
     });
   });
 
