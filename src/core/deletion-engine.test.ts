@@ -1372,12 +1372,15 @@ describe('DeletionEngine', () => {
     });
 
     it('leaves a checkpoint written by another run in place on completion', async () => {
-      // Same account, same channel, second tab: completing here must not wipe
-      // the cursor the other run is still using.
+      // Same account, same channel, an earlier run or a second tab: completing
+      // here must not wipe the cursor the other run is still using.
       const storage = createMemoryStorage();
       storageState.current = storage;
       const foreign = savedSession({ runId: 'other-tab', deletedCount: 7 });
-      storage.setItem(`detcord_progress:v2:${AUTHOR_ID}:c:${CHANNEL_ID}`, JSON.stringify(foreign));
+      storage.setItem(
+        `detcord_progress:v2:${AUTHOR_ID}:c:${CHANNEL_ID}:other-tab`,
+        JSON.stringify(foreign),
+      );
 
       const api = new FakeDiscordApi(createMessages(2));
       const engine = new DeletionEngine(api);

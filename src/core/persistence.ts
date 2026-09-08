@@ -5,12 +5,11 @@
  * every direct `localStorage.*` call throws. All access goes through
  * `getPageStorage()`, which falls back to a same-origin iframe.
  *
- * Progress is stored per author and per deletion target so that a run in one
- * server cannot clobber the saved cursor of a run in another. Two tabs on the
- * same account and target still share one key, so the last writer wins; what
- * {@link clearProgress} guarantees is narrower — a completed run only removes
- * the checkpoint it wrote itself, so finishing in one tab cannot erase a run
- * still in flight in the other.
+ * Progress is stored per author, per deletion target and per run, so neither a
+ * run in another server nor a second run over the same channel can clobber a
+ * saved cursor. Because the run ID is part of the key, a completed run only
+ * ever removes the checkpoint it wrote itself: an earlier stopped run over the
+ * same target stays resumable.
  */
 
 import { isValidGuildId, isValidSnowflake } from '../utils/validators';
@@ -20,7 +19,11 @@ import { getPageStorage } from './storage';
 // Constants
 // =============================================================================
 
-/** Prefix for every v2 progress entry. */
+/**
+ * Prefix for every v2 progress entry.
+ *
+ * Full keys are `detcord_progress:v2:<authorId>:<targetKey>:<runId>`.
+ */
 const KEY_PREFIX = 'detcord_progress:v2:';
 
 /** The v1 key, written by releases before per-target progress existed. */
@@ -122,16 +125,61 @@ export function targetKeyFor(opts: { guildId?: string; channelId?: string }): st
   return 'all';
 }
 
-/** Builds the full storage key for an author/target pair. */
-function storageKey(authorId: string, targetKey: string): string {
-  return `${KEY_PREFIX}${authorId}:${targetKey}`;
+/** Builds the key prefix covering every entry belonging to one author. */
+function authorPrefix(authorId: string): string {
+  return `${KEY_PREFIX}${authorId}:`;
 }
 
-/** Removes the v1 entry if it is still present. */
-function removeLegacyEntry(storage: Storage): void {
+/** Builds the key prefix covering every run over one author/target pair. */
+function targetPrefix(authorId: string, targetKey: string): string {
+  return `${authorPrefix(authorId)}${targetKey}:`;
+}
+
+/** Builds the full storage key for one run over one author/target pair. */
+function storageKey(authorId: string, targetKey: string, runId: string): string {
+  return `${targetPrefix(authorId, targetKey)}${runId}`;
+}
+
+/** Collects every stored key beginning with `prefix`; may throw. */
+function keysWithPrefix(storage: Storage, prefix: string): string[] {
+  const keys: string[] = [];
+  for (let index = 0; index < storage.length; index++) {
+    const key = storage.key(index);
+    if (key?.startsWith(prefix)) {
+      keys.push(key);
+    }
+  }
+  return keys;
+}
+
+/**
+ * Whether a v2 key predates the per-run layout.
+ *
+ * A current key ends in a run ID (`…:<authorId>:g:<guildId>:<runId>`); the
+ * first v2 layout stopped at the target (`…:<authorId>:g:<guildId>`). A key
+ * that matches neither shape is malformed and is swept out the same way.
+ *
+ * @param key - Full storage key, already known to carry the v2 prefix
+ * @returns True when the key has no usable run-ID segment
+ */
+function isOldLayoutKey(key: string): boolean {
+  const parts = key.slice(KEY_PREFIX.length).split(':');
+  if (parts[1] === 'g' || parts[1] === 'c') {
+    return parts.length < 4 || parts[3] === '';
+  }
+  return parts.length < 3 || parts[2] === '';
+}
+
+/** Removes the v1 entry and any v2 entry written under the old key layout. */
+function removeLegacyEntries(storage: Storage): void {
   try {
     if (storage.getItem(LEGACY_KEY) !== null) {
       storage.removeItem(LEGACY_KEY);
+    }
+    for (const key of keysWithPrefix(storage, KEY_PREFIX)) {
+      if (isOldLayoutKey(key)) {
+        storage.removeItem(key);
+      }
     }
   } catch {
     // A storage that refuses reads cannot hold a legacy entry we care about.
@@ -334,10 +382,10 @@ export function saveProgress(progress: SavedProgress): void {
   if (!storage) {
     return;
   }
-  removeLegacyEntry(storage);
+  removeLegacyEntries(storage);
   try {
     storage.setItem(
-      storageKey(progress.authorId, targetKeyFor(progress)),
+      storageKey(progress.authorId, targetKeyFor(progress), progress.runId),
       JSON.stringify(progress),
     );
   } catch {
@@ -346,19 +394,24 @@ export function saveProgress(progress: SavedProgress): void {
 }
 
 /**
- * Loads saved progress for one author/target pair.
+ * Loads saved progress for one run.
  *
  * @param authorId - The current user's ID
  * @param targetKey - Key from {@link targetKeyFor}
+ * @param runId - The run that wrote the checkpoint
  * @returns The saved progress, or null when missing, malformed or expired
  */
-export function loadProgress(authorId: string, targetKey: string): SavedProgress | null {
+export function loadProgress(
+  authorId: string,
+  targetKey: string,
+  runId: string,
+): SavedProgress | null {
   const storage = getPageStorage();
   if (!storage) {
     return null;
   }
-  removeLegacyEntry(storage);
-  return readEntry(storage, storageKey(authorId, targetKey));
+  removeLegacyEntries(storage);
+  return readEntry(storage, storageKey(authorId, targetKey, runId));
 }
 
 /**
@@ -374,17 +427,11 @@ export function findResumableSession(authorId: string): SavedProgress | null {
   if (!storage) {
     return null;
   }
-  removeLegacyEntry(storage);
+  removeLegacyEntries(storage);
 
-  const prefix = `${KEY_PREFIX}${authorId}:`;
-  const keys: string[] = [];
+  let keys: string[];
   try {
-    for (let index = 0; index < storage.length; index++) {
-      const key = storage.key(index);
-      if (key?.startsWith(prefix)) {
-        keys.push(key);
-      }
-    }
+    keys = keysWithPrefix(storage, authorPrefix(authorId));
   } catch {
     return null;
   }
@@ -402,30 +449,36 @@ export function findResumableSession(authorId: string): SavedProgress | null {
 /**
  * Clears saved progress for one author/target pair.
  *
- * When `runId` is given the entry is only removed if it belongs to that run.
- * Two tabs on the same account and target share one key, so without the check
- * a run finishing in one tab would erase the checkpoint of a run still going
- * in the other.
+ * With a run ID only that run's checkpoint is removed, so a run finishing here
+ * cannot erase the checkpoint of another run over the same target — an earlier
+ * stopped run, or the same account in a second tab. Without one, every run's
+ * checkpoint for that target goes.
  *
  * @param authorId - The current user's ID
  * @param targetKey - Key from {@link targetKeyFor}
- * @param runId - Only remove the entry when it carries this run ID
+ * @param runId - Only remove the checkpoint written by this run
  */
 export function clearProgress(authorId: string, targetKey: string, runId?: string): void {
   const storage = getPageStorage();
   if (!storage) {
     return;
   }
-  removeLegacyEntry(storage);
-  const key = storageKey(authorId, targetKey);
+  removeLegacyEntries(storage);
 
   if (runId) {
-    const entry = readEntry(storage, key);
-    if (entry !== null && entry.runId !== runId) {
-      return;
-    }
+    removeKey(storage, storageKey(authorId, targetKey, runId));
+    return;
   }
-  removeKey(storage, key);
+
+  let keys: string[];
+  try {
+    keys = keysWithPrefix(storage, targetPrefix(authorId, targetKey));
+  } catch {
+    return;
+  }
+  for (const key of keys) {
+    removeKey(storage, key);
+  }
 }
 
 // =============================================================================

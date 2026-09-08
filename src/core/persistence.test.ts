@@ -93,6 +93,8 @@ function createProgress(overrides: ProgressOverrides = {}): SavedProgress {
 
 const AUTHOR = '111111111111111111';
 const GUILD_KEY = 'g:222222222222222222';
+const CHANNEL_KEY = 'c:444444444444444444';
+const RUN = 'run-1';
 
 // =============================================================================
 // Tests
@@ -121,12 +123,12 @@ describe('persistence', () => {
   });
 
   describe('saveProgress / loadProgress', () => {
-    it('round-trips a v2 entry under the per-target key', () => {
+    it('round-trips a v2 entry under the per-run key', () => {
       const progress = createProgress();
       saveProgress(progress);
 
-      expect(storage.getItem(`detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`)).not.toBeNull();
-      expect(loadProgress(AUTHOR, GUILD_KEY)).toEqual(progress);
+      expect(storage.getItem(`detcord_progress:v2:${AUTHOR}:${GUILD_KEY}:${RUN}`)).not.toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY, RUN)).toEqual(progress);
     });
 
     it('keeps runs in different targets apart', () => {
@@ -140,18 +142,27 @@ describe('persistence', () => {
         }),
       );
 
-      expect(loadProgress(AUTHOR, GUILD_KEY)?.deletedCount).toBe(10);
-      expect(loadProgress(AUTHOR, 'c:444444444444444444')?.deletedCount).toBe(99);
+      expect(loadProgress(AUTHOR, GUILD_KEY, RUN)?.deletedCount).toBe(10);
+      expect(loadProgress(AUTHOR, CHANNEL_KEY, 'run-2')?.deletedCount).toBe(99);
+    });
+
+    it('keeps two runs over the same target apart', () => {
+      saveProgress(createProgress({ runId: 'run-one', deletedCount: 10 }));
+      saveProgress(createProgress({ runId: 'run-two', deletedCount: 99 }));
+
+      expect(storage.length).toBe(2);
+      expect(loadProgress(AUTHOR, GUILD_KEY, 'run-one')?.deletedCount).toBe(10);
+      expect(loadProgress(AUTHOR, GUILD_KEY, 'run-two')?.deletedCount).toBe(99);
     });
 
     it('returns null when nothing is stored', () => {
-      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY, RUN)).toBeNull();
     });
 
     it('returns null and does not throw when no storage is available', () => {
       storageState.current = null;
       expect(() => saveProgress(createProgress())).not.toThrow();
-      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY, RUN)).toBeNull();
       expect(findResumableSession(AUTHOR)).toBeNull();
       expect(() => clearProgress(AUTHOR, GUILD_KEY)).not.toThrow();
     });
@@ -169,32 +180,32 @@ describe('persistence', () => {
     });
 
     it('removes an entry with invalid JSON', () => {
-      const key = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`;
+      const key = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}:${RUN}`;
       storage.setItem(key, '{not json');
 
-      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY, RUN)).toBeNull();
       expect(storage.getItem(key)).toBeNull();
     });
 
     it('removes an entry that fails schema validation', () => {
-      const key = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`;
+      const key = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}:${RUN}`;
       storage.setItem(key, JSON.stringify({ version: 2, authorId: AUTHOR }));
 
-      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY, RUN)).toBeNull();
       expect(storage.getItem(key)).toBeNull();
     });
 
     it('removes an entry older than 24 hours', () => {
-      const key = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`;
+      const key = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}:${RUN}`;
       saveProgress(createProgress({ timestamp: Date.now() - 25 * 60 * 60 * 1000 }));
 
-      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY, RUN)).toBeNull();
       expect(storage.getItem(key)).toBeNull();
     });
 
     it('keeps an entry just inside the expiry window', () => {
       saveProgress(createProgress({ timestamp: Date.now() - 23 * 60 * 60 * 1000 }));
-      expect(loadProgress(AUTHOR, GUILD_KEY)).not.toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY, RUN)).not.toBeNull();
     });
 
     it('returns null when the storage read throws', () => {
@@ -205,7 +216,7 @@ describe('persistence', () => {
         },
       } as unknown as Storage;
 
-      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY, RUN)).toBeNull();
     });
   });
 
@@ -218,7 +229,7 @@ describe('persistence', () => {
 
     it('removes the legacy key on load', () => {
       storage.setItem('detcord_progress', '{}');
-      loadProgress(AUTHOR, GUILD_KEY);
+      loadProgress(AUTHOR, GUILD_KEY, RUN);
       expect(storage.getItem('detcord_progress')).toBeNull();
     });
 
@@ -230,7 +241,7 @@ describe('persistence', () => {
 
     it('never resumes from a v1 payload', () => {
       storage.setItem(
-        `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`,
+        `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}:${RUN}`,
         JSON.stringify({
           authorId: AUTHOR,
           lastMaxId: '1',
@@ -238,7 +249,43 @@ describe('persistence', () => {
           timestamp: Date.now(),
         }),
       );
-      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY, RUN)).toBeNull();
+    });
+  });
+
+  describe('legacy v2 key layout', () => {
+    it('removes an entry stored without a run ID and never returns it', () => {
+      const oldKey = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`;
+      storage.setItem(oldKey, JSON.stringify(createProgress()));
+
+      expect(findResumableSession(AUTHOR)).toBeNull();
+      expect(storage.getItem(oldKey)).toBeNull();
+    });
+
+    it('removes an old-layout entry on save without touching current entries', () => {
+      const oldKey = `detcord_progress:v2:${AUTHOR}:all`;
+      storage.setItem(oldKey, JSON.stringify(createProgress({ guildId: undefined })));
+
+      saveProgress(createProgress());
+
+      expect(storage.getItem(oldKey)).toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY, RUN)?.runId).toBe(RUN);
+    });
+
+    it('removes a key whose run-ID segment is empty', () => {
+      const emptyRun = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}:`;
+      storage.setItem(emptyRun, JSON.stringify(createProgress()));
+
+      expect(findResumableSession(AUTHOR)).toBeNull();
+      expect(storage.getItem(emptyRun)).toBeNull();
+    });
+
+    it('removes an old-layout channel entry on load', () => {
+      const oldKey = `detcord_progress:v2:${AUTHOR}:${CHANNEL_KEY}`;
+      storage.setItem(oldKey, JSON.stringify(createProgress({ guildId: undefined })));
+
+      expect(loadProgress(AUTHOR, CHANNEL_KEY, RUN)).toBeNull();
+      expect(storage.getItem(oldKey)).toBeNull();
     });
   });
 
@@ -257,6 +304,33 @@ describe('persistence', () => {
       expect(findResumableSession(AUTHOR)?.runId).toBe('new');
     });
 
+    it('leaves an earlier run resumable after a later run over the same target is cleared', () => {
+      // The stopped-then-restarted scenario: run one halts part way through
+      // channel A, run two sweeps the same channel and finishes. Clearing run
+      // two must leave run one's checkpoint discoverable, or the rest of run
+      // one's channels are silently never swept.
+      const target = { guildId: undefined, channelId: '444444444444444444' };
+      saveProgress(
+        createProgress({
+          ...target,
+          runId: 'run-one',
+          deletedCount: 5,
+          timestamp: Date.now() - 60_000,
+        }),
+      );
+      saveProgress(
+        createProgress({ ...target, runId: 'run-two', deletedCount: 40, timestamp: Date.now() }),
+      );
+
+      expect(findResumableSession(AUTHOR)?.runId).toBe('run-two');
+
+      clearProgress(AUTHOR, CHANNEL_KEY, 'run-two');
+
+      const resumable = findResumableSession(AUTHOR);
+      expect(resumable?.runId).toBe('run-one');
+      expect(resumable?.deletedCount).toBe(5);
+    });
+
     it('ignores entries belonging to another author', () => {
       saveProgress(createProgress({ authorId: '999999999999999999' }));
       expect(findResumableSession(AUTHOR)).toBeNull();
@@ -265,7 +339,7 @@ describe('persistence', () => {
     it('skips and removes expired entries while scanning', () => {
       saveProgress(createProgress({ timestamp: Date.now() - 48 * 60 * 60 * 1000 }));
       expect(findResumableSession(AUTHOR)).toBeNull();
-      expect(storage.getItem(`detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`)).toBeNull();
+      expect(storage.getItem(`detcord_progress:v2:${AUTHOR}:${GUILD_KEY}:${RUN}`)).toBeNull();
     });
 
     it('returns null when key enumeration throws', () => {
@@ -288,19 +362,22 @@ describe('persistence', () => {
   });
 
   describe('clearProgress', () => {
-    it('removes only the targeted entry', () => {
+    it('removes every run for the target and nothing for another target', () => {
       saveProgress(createProgress());
+      saveProgress(createProgress({ runId: 'run-2', deletedCount: 20 }));
       saveProgress(
         createProgress({ guildId: undefined, channelId: '444444444444444444', runId: 'keep' }),
       );
 
       clearProgress(AUTHOR, GUILD_KEY);
 
-      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
-      expect(loadProgress(AUTHOR, 'c:444444444444444444')?.runId).toBe('keep');
+      expect(loadProgress(AUTHOR, GUILD_KEY, RUN)).toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY, 'run-2')).toBeNull();
+      expect(loadProgress(AUTHOR, CHANNEL_KEY, 'keep')?.runId).toBe('keep');
     });
 
     it('swallows removal failures', () => {
+      saveProgress(createProgress());
       storageState.current = {
         ...storage,
         getItem: () => null,
@@ -312,22 +389,39 @@ describe('persistence', () => {
       expect(() => clearProgress(AUTHOR, GUILD_KEY)).not.toThrow();
     });
 
+    it('returns quietly when key enumeration throws', () => {
+      saveProgress(createProgress());
+      storageState.current = {
+        ...storage,
+        getItem: () => null,
+        key: () => {
+          throw new Error('blocked');
+        },
+        get length(): number {
+          return 1;
+        },
+      } as unknown as Storage;
+
+      expect(() => clearProgress(AUTHOR, GUILD_KEY)).not.toThrow();
+    });
+
     it('removes the entry when the run ID matches', () => {
       saveProgress(createProgress({ runId: 'run-a' }));
 
       clearProgress(AUTHOR, GUILD_KEY, 'run-a');
 
-      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY, 'run-a')).toBeNull();
     });
 
     it('keeps a checkpoint written by another run', () => {
-      // Two tabs share one key; the run that finishes first must not erase the
-      // checkpoint the other one is still relying on.
+      // A second run over the same target, or the same account in another tab:
+      // the run that finishes first must not erase the checkpoint the other
+      // one is still relying on.
       saveProgress(createProgress({ runId: 'other-tab' }));
 
       clearProgress(AUTHOR, GUILD_KEY, 'this-tab');
 
-      expect(loadProgress(AUTHOR, GUILD_KEY)?.runId).toBe('other-tab');
+      expect(loadProgress(AUTHOR, GUILD_KEY, 'other-tab')?.runId).toBe('other-tab');
     });
   });
 
@@ -397,10 +491,10 @@ describe('persistence', () => {
     });
 
     it('removes a stored entry whose IDs are not snowflakes', () => {
-      const key = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`;
+      const key = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}:${RUN}`;
       storage.setItem(key, JSON.stringify(createProgress({ cursor: { maxId: '17' } })));
 
-      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(loadProgress(AUTHOR, GUILD_KEY, RUN)).toBeNull();
       expect(storage.getItem(key)).toBeNull();
     });
 

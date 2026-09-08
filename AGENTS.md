@@ -145,12 +145,12 @@ Only progress is stored. Tokens must never be written to either storage path.
 Persistence uses schema version 2 and the key:
 
 ```text
-detcord_progress:v2:<authorId>:<targetKey>
+detcord_progress:v2:<authorId>:<targetKey>:<runId>
 ```
 
-The target key is derived from the guild or channel target. Records include the author, target, deletion order, monotonic cursor, counters, timestamp, and active filters.
+The target key is derived from the guild or channel target, and the run ID keys the checkpoint to one run, so a second run over the same target cannot orphan the first. Records include the author, target, deletion order, monotonic cursor, counters, timestamp, and active filters.
 
-Progress is saved every 10 deletions and on Stop. Records expire after 24 hours. Resume selects the newest valid record for the current author. Legacy `detcord_progress` version 1 data is deleted when encountered.
+Progress is saved every 10 deletions and on Stop. Records expire after 24 hours. Resume selects the newest valid record for the current author. Legacy `detcord_progress` version 1 data, and any v2 entry written under the earlier key layout without a run ID, is deleted when encountered.
 
 #### `token.ts`
 
