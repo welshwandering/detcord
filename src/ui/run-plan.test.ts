@@ -211,18 +211,18 @@ describe('saveRunPlan and loadRunPlan', () => {
       clear: (): void => {},
       key: (): string | null => null,
       getItem: (key: string): string | null => {
-        if (key === probeKey) {
+        if (key.startsWith(probeKey)) {
           return null;
         }
         throw new Error('blocked');
       },
       setItem: (key: string): void => {
-        if (key !== probeKey) {
+        if (!key.startsWith(probeKey)) {
           throw new Error('blocked');
         }
       },
       removeItem: (key: string): void => {
-        if (key !== probeKey) {
+        if (!key.startsWith(probeKey)) {
           throw new Error('blocked');
         }
       },

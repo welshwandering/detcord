@@ -34,6 +34,7 @@ import { describeSavedSession, resumePlanFor, savedSessionTarget } from './resum
 import { ReviewView } from './review-view';
 import { buildRunConfig, type RunConfig, runConfigSignature, type TargetScope } from './run-config';
 import { clearRunPlan, loadRunPlan, type RunPlanTotals } from './run-plan';
+import { RUN_STYLES } from './run-styles';
 import { DeletionRunner, type RunProgress, type RunSummary } from './runner';
 import { createMiniIndicator, type DraggingHandle, enableWindowDragging } from './window-chrome';
 import { createWindowHTML, TRIGGER_ICON } from './window-markup';
@@ -52,6 +53,7 @@ import {
   type WizardState,
   type WizardStep,
 } from './wizard';
+import { WIZARD_STYLES } from './wizard-styles';
 
 /** Screens the window can display. */
 export type ScreenId = 'setup' | 'running' | 'complete' | 'error';
@@ -333,7 +335,7 @@ export class DetcordUI {
     }
     const styleEl = document.createElement('style');
     styleEl.id = `${CSS_PREFIX}-styles`;
-    styleEl.textContent = WINDOW_STYLES;
+    styleEl.textContent = [WINDOW_STYLES, WIZARD_STYLES, RUN_STYLES].join('\n');
     document.head.appendChild(styleEl);
   }
 
