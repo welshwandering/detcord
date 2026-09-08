@@ -118,9 +118,10 @@ Repeated search `has` filters are encoded by calling `URLSearchParams.append` on
 - `NOT_FOUND`
 - `NETWORK_ERROR`
 - `SERVER_ERROR`
+- `ABORTED`
 - `UNKNOWN`
 
-It carries HTTP status, retry delay, global-rate-limit state, Discord error code, and an optional cause. `RATE_LIMITED`, `INDEXING`, `NETWORK_ERROR`, and `SERVER_ERROR` are retryable. Discord code 50083 identifies an archived thread.
+It carries HTTP status, retry delay, global-rate-limit state, Discord error code, and an optional cause. `RATE_LIMITED`, `INDEXING`, `NETWORK_ERROR`, and `SERVER_ERROR` are retryable. `ABORTED` means the run's own Stop cancelled the request through the `AbortSignal` every client method accepts; it is never retried. Discord code 50083 identifies an archived thread.
 
 #### `deletion-engine.ts`
 
@@ -221,7 +222,7 @@ Every failed request must throw `DiscordApiError`.
 - **401**: Stop the run with an authentication error.
 - **403**: Skip the message and report the reason. Code 50083 is an archived thread.
 - **404 delete response**: Return `already_gone`.
-- **Fetch rejection**: Throw `NETWORK_ERROR` with the original cause.
+- **Fetch rejection**: Throw `NETWORK_ERROR` with the original cause, or `ABORTED` when the caller's signal cancelled the request.
 - **5xx**: Throw `SERVER_ERROR`; the engine may retry it.
 
 When `X-RateLimit-Remaining` reaches zero, wait for the reset before issuing another request.
