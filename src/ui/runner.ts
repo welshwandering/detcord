@@ -150,6 +150,10 @@ export class DeletionRunner {
   private planConfig: RunConfig | null = null;
   private runId = '';
   private expectedTotal: number | null = null;
+  /** Where the last written plan said the run had reached. */
+  private planIndex = 0;
+  /** The banked counters the last written plan carried. */
+  private planTotals: RunTotals = EMPTY_TOTALS;
   private startedAt = 0;
   private pageHideHandler: (() => void) | null = null;
 
@@ -309,11 +313,29 @@ export class DeletionRunner {
     if (!config) {
       return;
     }
+    this.planIndex = index;
+    this.planTotals = { ...this.baseTotals };
+    this.refreshPlan();
+  }
+
+  /**
+   * Writes the plan again with what it last said, only newer.
+   *
+   * A checkpoint and its plan expire on the same clock, but only the engine
+   * refreshes the checkpoint while a channel runs. A channel that ran longer
+   * than the expiry would otherwise leave a fresh, resumable checkpoint beside
+   * a plan already too old to load, and resume would drop every queued channel.
+   */
+  private refreshPlan(): void {
+    const config = this.planConfig;
+    if (!config) {
+      return;
+    }
     saveRunPlan(
       runPlanFor(config, {
         runId: this.runId,
-        index,
-        completedTotals: this.baseTotals,
+        index: this.planIndex,
+        completedTotals: this.planTotals,
         expectedTotal: this.expectedTotal,
       }),
     );
@@ -408,6 +430,10 @@ export class DeletionRunner {
     // channels still queued and the counters banked from earlier ones.
     if (reason === 'completed' && this.planConfig) {
       clearRunPlan(this.planConfig.authorId, this.runId);
+    } else {
+      // The engine has just written a fresh checkpoint; the plan must be as
+      // fresh, or it expires first and the checkpoint resumes alone.
+      this.refreshPlan();
     }
 
     this.active = false;

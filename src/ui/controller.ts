@@ -148,6 +148,8 @@ export class DetcordUI {
   private resumeTotals: RunPlanTotals | null = null;
   private resumeExpectedTotal: number | null = null;
   private identityGeneration = 0;
+  /** True while the page is being asked which account it shows. */
+  private identityPending = false;
   private lastProgress: RunProgress | null = null;
 
   constructor(options?: DetcordUIOptions) {
@@ -287,6 +289,12 @@ export class DetcordUI {
     // the account behind it can be switched away from just as easily - so the
     // page is asked again and the pasted token only kept when it cannot answer.
     if (!this.runner.isActive()) {
+      // Nothing left over from the previous open may be acted on until the
+      // page has answered: a prompt that stayed visible could otherwise start
+      // a run under an account Discord no longer shows.
+      this.pendingResume = null;
+      this.pendingPlan = null;
+      this.setVisibility('resumePrompt', false);
       void this.establishIdentity();
     } else if (this.identityChecked && this.authorId) {
       this.offerResume(this.authorId);
@@ -462,10 +470,12 @@ export class DetcordUI {
    */
   private async establishIdentity(): Promise<void> {
     const generation = ++this.identityGeneration;
+    this.identityPending = true;
     const identity = await resolveIdentity(this.createApiClient);
     if (generation !== this.identityGeneration) {
       return;
     }
+    this.identityPending = false;
     if (!identity.ok) {
       if (this.keepManualIdentity()) {
         return;
@@ -575,6 +585,8 @@ export class DetcordUI {
     if (generation !== this.identityGeneration) {
       return;
     }
+    // A token confirmed by hand supersedes whatever page check was in flight.
+    this.identityPending = false;
     if (!identity.ok) {
       this.showError(identity.error);
       return;
@@ -885,7 +897,7 @@ export class DetcordUI {
    * one. A second confirmation cannot start a second run.
    */
   private handleConfirmDelete(): void {
-    if (this.runner.isActive() || this.scanning) {
+    if (this.runner.isActive() || this.scanning || this.identityPending) {
       return;
     }
     const config = this.reviewConfig;
@@ -995,7 +1007,7 @@ export class DetcordUI {
   private handleResumeSession(): void {
     const saved = this.pendingResume;
     const authorId = this.authorId;
-    if (!saved || !this.token || !authorId) {
+    if (!saved || !this.token || !authorId || this.identityPending) {
       return;
     }
     const resume = resumePlanFor(

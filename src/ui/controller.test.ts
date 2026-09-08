@@ -498,6 +498,44 @@ describe('DetcordUI', () => {
       ).toBe(false);
     });
 
+    it('will not let a leftover resume prompt start a run while the page is still being asked', async () => {
+      vi.mocked(getToken).mockReturnValue(null);
+      ui = mountUI({
+        findResumableSession: (authorId) => (authorId === 'account-b' ? savedForResume : null),
+      });
+      ui.show();
+      await flush();
+      await pasteTokenFor('account-b', 'token-b');
+      expect(
+        document.querySelector('[data-bind="resumePrompt"]')?.classList.contains('visible'),
+      ).toBe(true);
+      ui.hide();
+
+      // Discord now belongs to another account, and its identity request is
+      // slow to answer.
+      vi.mocked(getToken).mockReturnValue('token-c');
+      let answer: (user: CurrentUser) => void = () => {};
+      getCurrentUserSpy = vi.fn(
+        () =>
+          new Promise<CurrentUser>((resolve) => {
+            answer = resolve;
+          }),
+      );
+      ui.show();
+      // Resume pressed before the page has answered.
+      clickAction('resumeSession');
+      await flush();
+      expect(startedEngines()).toHaveLength(0);
+
+      answer({ id: 'account-c', username: 'c', globalName: null });
+      await flush();
+      // Account B's prompt does not carry over to account C, and nothing ran.
+      expect(
+        document.querySelector('[data-bind="resumePrompt"]')?.classList.contains('visible'),
+      ).toBe(false);
+      expect(startedEngines()).toHaveLength(0);
+    });
+
     it('keeps a pasted token while the page still cannot be read', async () => {
       vi.mocked(getToken).mockReturnValue(null);
       ui = mountUI();

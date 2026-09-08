@@ -573,6 +573,49 @@ describe('DeletionRunner run plans', () => {
     expect(plan.expectedTotal).toBe(30);
   });
 
+  it('rewrites the plan when a run stops, so it outlives a long channel as its checkpoint does', async () => {
+    const started = Date.parse('2026-09-08T00:00:00Z');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(started);
+    try {
+      let created = 0;
+      let release = (): void => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const runner = new DeletionRunner({
+        createApiClient: () => fakeClient(),
+        createEngine: () => {
+          created++;
+          const engine = new FakeEngine();
+          if (created === 2) {
+            engine.gate = gate;
+          }
+          return engine;
+        },
+      });
+      const running = runner.start('token', configFor([CHANNEL_A, CHANNEL_B, CHANNEL_C]), {
+        expectedTotal: 30,
+      });
+      await settle();
+      expect(FakeEngine.instances).toHaveLength(2);
+
+      // The second channel runs for longer than a plan is allowed to live.
+      clock.mockReturnValue(started + 25 * 60 * 60 * 1000);
+      runner.stop();
+      release();
+      await running;
+
+      const plan = loadRunPlan('author-1', runIdOf()) as RunPlan;
+      expect(plan).not.toBeNull();
+      expect(plan.index).toBe(1);
+      // Still only the finished channel's work is banked.
+      expect(plan.completedTotals).toEqual({ deleted: 1, failed: 0, skipped: 0, alreadyGone: 0 });
+      expect(plan.expectedTotal).toBe(30);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('files the plan under the author and the run', async () => {
     const { runId } = await stopInSecondChannel();
     expect(window.localStorage.getItem(`detcord_runplan:v2:author-1:${runId}`)).not.toBeNull();
