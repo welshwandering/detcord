@@ -8,7 +8,8 @@
  * share one tested path.
  */
 
-const PROBE_KEY = '__detcord_storage_probe__';
+/** Prefix for the throwaway key used to prove a storage accepts writes. */
+const PROBE_KEY_PREFIX = '__detcord_storage_probe__';
 
 /** Cached result of the first successful probe; `undefined` until probed. */
 let cachedStorage: Storage | null | undefined;
@@ -17,7 +18,17 @@ let cachedStorage: Storage | null | undefined;
 let storageFrame: HTMLIFrameElement | null = null;
 
 /**
+ * Builds a probe key unlikely to collide with anything the page already stores.
+ */
+function probeKey(): string {
+  return `${PROBE_KEY_PREFIX}${Math.random().toString(36).slice(2)}`;
+}
+
+/**
  * Checks that a value behaves like a usable `Storage`.
+ *
+ * The probe writes under a randomly suffixed key and puts whatever was there
+ * back, so a page value can never be destroyed by the check.
  */
 function isUsableStorage(candidate: unknown): candidate is Storage {
   if (!candidate || typeof candidate !== 'object') {
@@ -27,9 +38,15 @@ function isUsableStorage(candidate: unknown): candidate is Storage {
   if (typeof storage.getItem !== 'function' || typeof storage.setItem !== 'function') {
     return false;
   }
+  const key = probeKey();
   try {
-    storage.setItem(PROBE_KEY, '1');
-    storage.removeItem(PROBE_KEY);
+    const existing = storage.getItem(key);
+    storage.setItem(key, '1');
+    if (existing === null) {
+      storage.removeItem(key);
+    } else {
+      storage.setItem(key, existing);
+    }
     return true;
   } catch {
     return false;

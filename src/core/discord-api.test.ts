@@ -463,6 +463,49 @@ describe('DiscordApiClient', () => {
       expect(error.code).toBe('NETWORK_ERROR');
       expect(error.message).toBe('Network request failed');
     });
+
+    it('should throw NETWORK_ERROR for a truncated success body', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse({ status: 200, bodyThrows: true }));
+
+      const error = await captureError(() => client.searchMessages({ guildId: TEST_GUILD_ID }));
+
+      expect(error.code).toBe('NETWORK_ERROR');
+      expect(error.message).toBe("Could not read Discord's response");
+      expect(error.httpStatus).toBe(200);
+      expect(error.isRetryable).toBe(true);
+    });
+
+    it('should throw NETWORK_ERROR when the body stream fails', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: '',
+        headers: new Headers(),
+        json: async () => {
+          throw new TypeError('network error');
+        },
+      } as unknown as Response);
+
+      const error = await captureError(() => client.searchMessages({ guildId: TEST_GUILD_ID }));
+
+      expect(error.code).toBe('NETWORK_ERROR');
+      expect(error.cause).toBeInstanceOf(TypeError);
+    });
+
+    it.each([
+      ['messages is not an array', { messages: {}, total_results: 3 }],
+      ['total_results is missing', { messages: [] }],
+      ['total_results is not numeric', { messages: [], total_results: '3' }],
+      ['the payload is null', null],
+    ])('should throw UNKNOWN when %s', async (_label, body) => {
+      mockFetch.mockResolvedValueOnce(makeResponse({ status: 200, body }));
+
+      const error = await captureError(() => client.searchMessages({ guildId: TEST_GUILD_ID }));
+
+      expect(error.code).toBe('UNKNOWN');
+      expect(error.message).toBe('Unexpected response shape');
+      expect(error.httpStatus).toBe(200);
+    });
   });
 
   describe('deleteMessage', () => {
@@ -664,7 +707,24 @@ describe('DiscordApiClient', () => {
       const error = await captureError(() => client.getCurrentUser());
 
       expect(error.code).toBe('UNKNOWN');
-      expect(error.message).toBe('Unexpected response from /users/@me');
+      expect(error.message).toBe('Unexpected response shape');
+    });
+
+    it('should throw NETWORK_ERROR when the body cannot be parsed', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse({ status: 200, bodyThrows: true }));
+
+      const error = await captureError(() => client.getCurrentUser());
+
+      expect(error.code).toBe('NETWORK_ERROR');
+      expect(error.message).toBe("Could not read Discord's response");
+      expect(error.httpStatus).toBe(200);
+      expect(error.cause).toBeInstanceOf(SyntaxError);
+    });
+
+    it('should throw UNKNOWN when the payload is not an object', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse({ status: 200, body: 'nope' }));
+
+      expect((await captureError(() => client.getCurrentUser())).code).toBe('UNKNOWN');
     });
   });
 
@@ -709,6 +769,26 @@ describe('DiscordApiClient', () => {
 
       expect(error.code).toBe('FORBIDDEN');
       expect(error.discordCode).toBe(50001);
+    });
+
+    it('should throw NETWORK_ERROR when the channel list cannot be read', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse({ status: 200, bodyThrows: true }));
+
+      const error = await captureError(() => client.getGuildChannels(TEST_GUILD_ID));
+
+      expect(error.code).toBe('NETWORK_ERROR');
+      expect(error.message).toBe("Could not read Discord's response");
+    });
+
+    it('should throw UNKNOWN when the channel list is not an array', async () => {
+      mockFetch.mockResolvedValueOnce(
+        makeResponse({ status: 200, body: { channels: [{ id: '1', type: 0 }] } }),
+      );
+
+      const error = await captureError(() => client.getGuildChannels(TEST_GUILD_ID));
+
+      expect(error.code).toBe('UNKNOWN');
+      expect(error.message).toBe('Unexpected response shape');
     });
   });
 });

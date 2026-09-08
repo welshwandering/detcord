@@ -57,8 +57,14 @@ const REDOS_TEST_STRING = `${'a'.repeat(25)}!`;
 // Catastrophic backtracking detection
 // =============================================================================
 
-/** Whether a quantifier can repeat without an upper bound. */
-type QuantifierKind = 'none' | 'bounded' | 'open';
+/**
+ * How often a quantifier can repeat what precedes it.
+ *
+ * `atMostOne` covers `?`, `{0,1}` and `{1}`: they cannot make a group match the
+ * same input in two ways, so they are harmless. Everything that can repeat more
+ * than once — including bounded forms such as `{1,100}` — is `repeating`.
+ */
+type QuantifierKind = 'none' | 'atMostOne' | 'repeating';
 
 /** What has been seen inside the group currently being scanned. */
 interface GroupContents {
@@ -121,15 +127,32 @@ function skipGroupPrefix(pattern: string, start: number): number {
 const BRACE_QUANTIFIER = /^\{(\d+)(,(\d*))?\}/;
 
 /**
+ * Whether a brace quantifier can apply what precedes it more than once.
+ *
+ * `{n}` repeats when `n > 1`, `{n,}` always repeats, and `{n,m}` repeats when
+ * `m > 1`. `{1}`, `{0,1}` and `{1,1}` cannot.
+ *
+ * @param match - A successful {@link BRACE_QUANTIFIER} match
+ */
+function braceRepeats(match: RegExpExecArray): boolean {
+  const minimum = Number.parseInt(match[1] ?? '0', 10);
+  if (match[2] === undefined) {
+    return minimum > 1;
+  }
+  const maximum = match[3];
+  return !maximum || Number.parseInt(maximum, 10) > 1;
+}
+
+/**
  * Classifies the quantifier (if any) starting at `index`.
  */
 function quantifierAt(pattern: string, index: number): QuantifierKind {
   const char = pattern[index];
   if (char === '+' || char === '*') {
-    return 'open';
+    return 'repeating';
   }
   if (char === '?') {
-    return 'bounded';
+    return 'atMostOne';
   }
   if (char !== '{') {
     return 'none';
@@ -138,8 +161,7 @@ function quantifierAt(pattern: string, index: number): QuantifierKind {
   if (!match) {
     return 'none';
   }
-  // `{n,}` has a comma but no upper bound, so it repeats without limit.
-  return match[2] !== undefined && !match[3] ? 'open' : 'bounded';
+  return braceRepeats(match) ? 'repeating' : 'atMostOne';
 }
 
 /** Mutable state carried through a single pattern scan. */
@@ -158,13 +180,13 @@ function emptyGroup(): GroupContents {
 }
 
 /**
- * Closes the innermost group, flagging the pattern when that group repeats
- * without an upper bound over an ambiguous body, and folding what it contained
- * into its parent.
+ * Closes the innermost group, flagging the pattern when that group can repeat
+ * more than once over an ambiguous body, and folding what it contained into
+ * its parent.
  */
 function closeGroup(state: ScanState, pattern: string, index: number): void {
-  const repeatsFreely = quantifierAt(pattern, index + 1) === 'open';
-  if (repeatsFreely && (state.current.alternation || state.current.quantifier)) {
+  const repeats = quantifierAt(pattern, index + 1) === 'repeating';
+  if (repeats && (state.current.alternation || state.current.quantifier)) {
     state.risky = true;
   }
   const parent = state.stack.pop() ?? emptyGroup();
@@ -210,10 +232,14 @@ function scanStep(pattern: string, index: number, state: ScanState): number {
  * Detects a quantified group whose body can match the same input in more than
  * one way — the shape behind catastrophic backtracking.
  *
- * A group repeated without an upper bound is dangerous when its body contains
- * an alternation (`(a|aa)+`) or another quantifier (`(a+)+`, `(?:x+)+`).
+ * A group is dangerous when its body contains an alternation (`(a|aa)`) or
+ * another quantifier (`(a+)`, `(?:x+)`) and the group itself is repeated by a
+ * quantifier that can apply more than once. That includes bounded forms:
+ * `^(a|aa){1,100}$` backtracks just as catastrophically as `^(a|aa)+$`. Only
+ * `?`, `{0,1}` and `{1}` leave such a group safe.
+ *
  * Deciding whether the alternatives genuinely overlap needs full automata
- * analysis, so every quantified alternation is refused.
+ * analysis, so every repeated alternation is refused.
  *
  * @param pattern - The regex source to inspect
  * @returns True when the pattern contains such a group

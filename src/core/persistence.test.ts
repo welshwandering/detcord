@@ -311,6 +311,24 @@ describe('persistence', () => {
 
       expect(() => clearProgress(AUTHOR, GUILD_KEY)).not.toThrow();
     });
+
+    it('removes the entry when the run ID matches', () => {
+      saveProgress(createProgress({ runId: 'run-a' }));
+
+      clearProgress(AUTHOR, GUILD_KEY, 'run-a');
+
+      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+    });
+
+    it('keeps a checkpoint written by another run', () => {
+      // Two tabs share one key; the run that finishes first must not erase the
+      // checkpoint the other one is still relying on.
+      saveProgress(createProgress({ runId: 'other-tab' }));
+
+      clearProgress(AUTHOR, GUILD_KEY, 'this-tab');
+
+      expect(loadProgress(AUTHOR, GUILD_KEY)?.runId).toBe('other-tab');
+    });
   });
 
   describe('isValidProgressData', () => {
@@ -347,11 +365,43 @@ describe('persistence', () => {
           hasFile: false,
           includePinned: true,
           pattern: 'a.*b',
-          minId: '1',
-          maxId: '2',
+          minId: '555555555555555555',
+          maxId: '666666666666666666',
         },
       });
       expect(isValidProgressData(progress)).toBe(true);
+    });
+
+    it.each([
+      ['a non-snowflake authorId', { ...createProgress(), authorId: 'nope' }],
+      ['a non-snowflake channelId', { ...createProgress(), channelId: '42' }],
+      ['a non-snowflake guildId', { ...createProgress(), guildId: 'guild' }],
+      ['a non-snowflake cursor maxId', { ...createProgress(), cursor: { maxId: '1' } }],
+      ['a non-snowflake cursor minId', { ...createProgress(), cursor: { minId: '1' } }],
+      [
+        'a non-snowflake filter minId',
+        { ...createProgress(), filters: { minId: '1', maxId: '666666666666666666' } },
+      ],
+      ['a non-snowflake filter maxId', { ...createProgress(), filters: { maxId: 'tomorrow' } }],
+      ['a negative counter', { ...createProgress(), deletedCount: -1 }],
+      ['a fractional counter', { ...createProgress(), skippedCount: 2.5 }],
+      ['an infinite counter', { ...createProgress(), totalFound: Number.POSITIVE_INFINITY }],
+      ['a timestamp far in the future', { ...createProgress(), timestamp: Date.now() + 600_000 }],
+    ])('rejects %s', (_label, value) => {
+      expect(isValidProgressData(value)).toBe(false);
+    });
+
+    it('accepts a guild-wide DM entry and a timestamp inside the skew allowance', () => {
+      expect(isValidProgressData(createProgress({ guildId: '@me' }))).toBe(true);
+      expect(isValidProgressData(createProgress({ timestamp: Date.now() + 60_000 }))).toBe(true);
+    });
+
+    it('removes a stored entry whose IDs are not snowflakes', () => {
+      const key = `detcord_progress:v2:${AUTHOR}:${GUILD_KEY}`;
+      storage.setItem(key, JSON.stringify(createProgress({ cursor: { maxId: '17' } })));
+
+      expect(loadProgress(AUTHOR, GUILD_KEY)).toBeNull();
+      expect(storage.getItem(key)).toBeNull();
     });
 
     it('accepts an oldest-first cursor', () => {

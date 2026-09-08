@@ -302,7 +302,7 @@ const MAX_HEADER_WAIT_MS = 60000;
 /** Consecutive successes needed before the delete delay is reduced. */
 const THROTTLE_RECOVERY_THRESHOLD = 5;
 
-/** Fraction of the gap to baseline recovered after each success run. */
+/** Fraction of the current delay given back after each run of successes. */
 const THROTTLE_RECOVERY_PERCENTAGE = 0.1;
 
 /** Fraction of the gap toward `retry_after` added when throttled. */
@@ -589,9 +589,11 @@ export class DeletionEngine {
   /**
    * Previews what a run would delete, without deleting anything.
    *
-   * `totalCount` is Discord's total for the search. When `filtersApplied` is
-   * true, client-side filtering (pattern, pinned, message type, ownership) can
-   * exclude some of those, so the count is an upper bound.
+   * `totalCount` is Discord's total for the search. `filtersApplied` is false
+   * only when the first page held every result and none of them was excluded
+   * by a client-side filter; in every other case results outside the sample
+   * may still be excluded by pattern, pin state, message type or ownership, so
+   * the count is an upper bound.
    *
    * @returns Total count, up to ten sample messages, a duration estimate, and
    *   whether client-side filters apply
@@ -601,7 +603,6 @@ export class DeletionEngine {
       throw new Error('Cannot preview while running');
     }
     this.assertConfigured();
-    const opts = this.options as DeletionEngineOptions;
 
     const response = await this.apiClient.searchMessages(this.buildSearchParams({}));
     const messages = extractHits(response);
@@ -611,15 +612,13 @@ export class DeletionEngine {
     const pagesNeeded = Math.ceil(totalCount / MESSAGES_PER_PAGE);
     const estimatedTimeMs =
       totalCount * this.getDeleteDelay() + pagesNeeded * this.getSearchDelay();
+    const sampleIsExact = messages.length >= totalCount && deletable.length === messages.length;
 
     return {
       totalCount,
       sampleMessages: deletable.slice(0, 10),
       estimatedTimeMs,
-      filtersApplied:
-        Boolean(opts.pattern) ||
-        opts.includePinned !== true ||
-        deletable.length !== messages.length,
+      filtersApplied: !sampleIsExact,
     };
   }
 
@@ -675,11 +674,16 @@ export class DeletionEngine {
     };
   }
 
-  /** Clears the saved session for the configured author and target. */
+  /**
+   * Clears the saved session for the configured author and target.
+   *
+   * While a run owns a run ID, only that run's checkpoint is removed, so a
+   * completion in this tab cannot erase a checkpoint written by another.
+   */
   clearSavedSession(): void {
     const opts = this.options;
     if (!opts) return;
-    clearProgress(opts.authorId, targetKeyFor(opts));
+    clearProgress(opts.authorId, targetKeyFor(opts), this.runId);
   }
 
   // =========================================================================
@@ -932,11 +936,14 @@ export class DeletionEngine {
   }
 
   /**
-   * Moves the cursor strictly below the oldest message on the page.
+   * Moves the cursor down to the oldest message the page contained.
    *
-   * `max_id` may be inclusive, so a cursor that did not move is decremented by
-   * one. Combined, this guarantees every iteration makes progress and no
-   * message is stepped over.
+   * The next search asks for `max_id = <page minimum>`. Discord's `max_id` may
+   * be inclusive, in which case that page minimum comes back once more and is
+   * skipped by {@link attemptedMessageIds}; what must never happen is a cursor
+   * that does not move, so when the page minimum is not below the current
+   * cursor the cursor is decremented by one instead. Progress is therefore
+   * monotonic whether or not anything on the page was deletable.
    *
    * @returns The next cursor, or null when the range is exhausted
    */
@@ -973,7 +980,14 @@ export class DeletionEngine {
         continue;
       }
 
-      this.recordOutcome(message, await this.deleteWithRetry(message));
+      const outcome = await this.deleteWithRetry(message);
+      if (outcome === null) {
+        // Stopped before the delete was attempted: leave no trace of the
+        // attempt so a resumed run picks this message up again.
+        this.attemptedMessageIds.delete(message.id);
+        return;
+      }
+      this.recordOutcome(message, outcome);
       await this.delay(this.getDeleteDelay());
     }
   }
@@ -1073,6 +1087,9 @@ export class DeletionEngine {
       try {
         const params = this.buildSearchParams(range);
         await this.respectRateLimitHeader();
+        if (!(await this.readyForRequest())) {
+          return [];
+        }
         const started = Date.now();
         const response = await this.apiClient.searchMessages(params);
         this.recordPing(Date.now() - started);
@@ -1120,26 +1137,34 @@ export class DeletionEngine {
         budget.indexing++;
         if (budget.indexing > maxRetries * INDEXING_RETRY_MULTIPLIER) throw error;
         this.setStatus(INDEXING_STATUS);
-        await this.delay(this.getSearchDelay());
+        await this.waitBeforeRetry(this.getSearchDelay());
         return;
       case 'NETWORK_ERROR':
       case 'SERVER_ERROR':
         budget.backoff++;
         if (budget.backoff > maxRetries) throw error;
-        await this.delay(backoffDelayMs(budget.backoff));
+        await this.waitBeforeRetry(backoffDelayMs(budget.backoff));
         return;
       default:
         throw error;
     }
   }
 
-  /** Deletes one message with the full retry policy. */
-  private async deleteWithRetry(message: DiscordMessage): Promise<MessageOutcome> {
+  /**
+   * Deletes one message with the full retry policy.
+   *
+   * @returns The outcome, or null when the run was stopped before the delete
+   *   was attempted — the caller must then record nothing for this message
+   */
+  private async deleteWithRetry(message: DiscordMessage): Promise<MessageOutcome | null> {
     const budget: RetryBudget = { backoff: 0, indexing: 0, rateLimits: 0 };
 
     while (!this.stopRequested) {
       try {
         await this.respectRateLimitHeader();
+        if (!(await this.readyForRequest())) {
+          return null;
+        }
         const started = Date.now();
         const result = await this.apiClient.deleteMessage(message.channel_id, message.id);
         this.recordPing(Date.now() - started);
@@ -1155,7 +1180,7 @@ export class DeletionEngine {
         }
       }
     }
-    return { status: 'skipped', reason: 'Stopped before deletion' };
+    return null;
   }
 
   /**
@@ -1185,7 +1210,7 @@ export class DeletionEngine {
       case 'SERVER_ERROR':
         budget.backoff++;
         if (budget.backoff > this.getMaxRetries()) return failureOutcome(error);
-        await this.delay(backoffDelayMs(budget.backoff));
+        await this.waitBeforeRetry(backoffDelayMs(budget.backoff));
         return null;
       case 'FORBIDDEN':
         return {
@@ -1206,7 +1231,31 @@ export class DeletionEngine {
     this.stats.throttledCount++;
     this.stats.throttledTime += waitMs;
     this.handleRateLimit(waitMs);
-    await this.delay(waitMs);
+    await this.waitBeforeRetry(waitMs);
+  }
+
+  /**
+   * Waits `ms`, then holds for as long as the run is paused.
+   *
+   * Every retry wait goes through here so that a Pause entered during the wait
+   * still blocks the retry, rather than being noticed only at the next page.
+   */
+  private async waitBeforeRetry(ms: number): Promise<void> {
+    await this.delay(ms);
+    await this.waitWhilePaused();
+  }
+
+  /**
+   * Holds for a pause and reports whether another request may be issued.
+   *
+   * Called immediately before every search and delete: a Stop that aborted the
+   * preceding wait must not be followed by one more request.
+   *
+   * @returns False when the run has been stopped
+   */
+  private async readyForRequest(): Promise<boolean> {
+    await this.waitWhilePaused();
+    return !this.stopRequested;
   }
 
   /** Waits out an exhausted bucket before spending another request on it. */
@@ -1324,10 +1373,9 @@ export class DeletionEngine {
       return;
     }
 
-    const gap = this.currentDelay - this.baselineDelay;
     this.currentDelay = Math.max(
       this.baselineDelay,
-      this.currentDelay - gap * THROTTLE_RECOVERY_PERCENTAGE,
+      this.currentDelay * (1 - THROTTLE_RECOVERY_PERCENTAGE),
     );
     this.consecutiveSuccesses = 0;
 

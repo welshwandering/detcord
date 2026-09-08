@@ -209,6 +209,46 @@ async function readJsonBody(response: Response): Promise<DiscordErrorBody> {
 }
 
 /**
+ * Reads a successful response body as JSON.
+ *
+ * A 200 whose body is truncated or whose stream fails is a transport problem,
+ * not a protocol one, so it leaves the client as a retryable `NETWORK_ERROR`
+ * rather than as a bare `SyntaxError` the engine would rethrow.
+ *
+ * @throws DiscordApiError with code `NETWORK_ERROR`
+ */
+async function readSuccessBody(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch (err) {
+    throw new DiscordApiError('NETWORK_ERROR', "Could not read Discord's response", {
+      httpStatus: response.status,
+      cause: err,
+    });
+  }
+}
+
+/** The error thrown when a successful response does not carry what we expect. */
+function unexpectedShape(response: Response): DiscordApiError {
+  return new DiscordApiError('UNKNOWN', 'Unexpected response shape', {
+    httpStatus: response.status,
+  });
+}
+
+/** Whether a parsed body carries the two fields a search response must have. */
+function isSearchResponse(data: unknown): data is SearchResponse {
+  if (typeof data !== 'object' || data === null) {
+    return false;
+  }
+  const body = data as { messages?: unknown; total_results?: unknown };
+  return (
+    Array.isArray(body.messages) &&
+    typeof body.total_results === 'number' &&
+    Number.isFinite(body.total_results)
+  );
+}
+
+/**
  * Parses a numeric header value, ignoring absent and non-numeric values.
  */
 function parseNumericHeader(value: string | null): number | undefined {
@@ -405,7 +445,11 @@ export class DiscordApiClient {
       throw await errorForResponse(response);
     }
 
-    return (await response.json()) as SearchResponse;
+    const data = await readSuccessBody(response);
+    if (!isSearchResponse(data)) {
+      throw unexpectedShape(response);
+    }
+    return data;
   }
 
   /**
@@ -451,16 +495,14 @@ export class DiscordApiClient {
       throw await errorForResponse(response);
     }
 
-    const data = (await response.json()) as {
+    const data = (await readSuccessBody(response)) as {
       id?: unknown;
       username?: unknown;
       global_name?: unknown;
-    };
+    } | null;
 
-    if (typeof data.id !== 'string' || data.id.length === 0) {
-      throw new DiscordApiError('UNKNOWN', 'Unexpected response from /users/@me', {
-        httpStatus: response.status,
-      });
+    if (typeof data?.id !== 'string' || data.id.length === 0) {
+      throw unexpectedShape(response);
     }
 
     return {
@@ -490,8 +532,11 @@ export class DiscordApiClient {
       throw await errorForResponse(response);
     }
 
-    const channels = (await response.json()) as DiscordChannel[];
-    return channels.filter((channel) => TEXT_CHANNEL_TYPES.has(channel.type));
+    const channels = await readSuccessBody(response);
+    if (!Array.isArray(channels)) {
+      throw unexpectedShape(response);
+    }
+    return (channels as DiscordChannel[]).filter((channel) => TEXT_CHANNEL_TYPES.has(channel.type));
   }
 
   /**

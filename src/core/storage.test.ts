@@ -119,6 +119,47 @@ describe('getPageStorage', () => {
     expect(document.body.querySelector('iframe')).toBeNull();
   });
 
+  it('leaves the page value under the legacy probe key untouched', () => {
+    // v1.0.2 wrote and removed a fixed `__detcord_storage_probe__` key, which
+    // destroyed whatever the page had stored under it.
+    const windowStorage = fakeStorage();
+    windowStorage.setItem('__detcord_storage_probe__', 'precious');
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: windowStorage });
+
+    expect(getPageStorage()).toBe(windowStorage);
+    expect(windowStorage.getItem('__detcord_storage_probe__')).toBe('precious');
+    expect(windowStorage.length).toBe(1);
+  });
+
+  it('restores a value that already occupies the probe key', () => {
+    const map = new Map<string, string>();
+    const removed: string[] = [];
+    // Reports a pre-existing value for any probe key, whatever the random suffix.
+    const storage = {
+      get length(): number {
+        return map.size;
+      },
+      clear: () => map.clear(),
+      getItem: (key: string) =>
+        map.get(key) ?? (key.startsWith('__detcord_storage_probe__') ? 'occupied' : null),
+      key: (index: number) => Array.from(map.keys())[index] ?? null,
+      removeItem: (key: string) => {
+        removed.push(key);
+        map.delete(key);
+      },
+      setItem: (key: string, value: string) => {
+        map.set(key, value);
+      },
+    } as Storage;
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+
+    expect(getPageStorage()).toBe(storage);
+    expect(removed).toEqual([]);
+    const written = Array.from(map.entries());
+    expect(written).toHaveLength(1);
+    expect(written[0]?.[1]).toBe('occupied');
+  });
+
   it('caches the probe result until reset', () => {
     const first = getPageStorage();
     Object.defineProperty(window, 'localStorage', { configurable: true, value: undefined });

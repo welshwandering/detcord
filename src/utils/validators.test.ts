@@ -102,6 +102,29 @@ describe('validateRegex', () => {
       expect(result.error).toContain('performance');
     });
 
+    it.each([
+      ['^(a|aa){1,100}$', 'bounded repetition of an ambiguous alternation'],
+      ['^.{50}(a|aa){1,100}$', 'the same, hidden behind a fixed-length prefix'],
+      ['(a+){2}', 'exact repetition of a quantified body'],
+      ['(?:x+){3,5}', 'bounded repetition of a quantified non-capturing group'],
+      ['(a|ab){2,}', 'open-ended repetition of an alternation'],
+    ])('should reject %s (%s)', (pattern) => {
+      // Bounded repetition backtracks just as catastrophically as `+`:
+      // `^.{50}(a|aa){1,100}$` took over a second on a 151-character subject.
+      const result = validateRegex(pattern);
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('performance');
+    });
+
+    it.each(['(cat|dog)?', '(cat|dog){1}', '(foo|bar)\\d{3}', 'https?://\\S+'])(
+      'should accept the bounded-safe pattern %s',
+      (pattern) => {
+        // `?`, `{0,1}` and `{1}` cannot apply a group twice, so an alternation
+        // under them is not ambiguous.
+        expect(validateRegex(pattern).valid).toBe(true);
+      },
+    );
+
     it('should reject a quantified alternation quickly rather than by timing out', () => {
       // The pattern is the reproduction case: matching 38 "a"s against it took
       // ~690ms before this check existed. Rejection must be structural.
@@ -110,6 +133,17 @@ describe('validateRegex', () => {
       const elapsed = performance.now() - start;
 
       expect(result.valid).toBe(false);
+      expect(elapsed).toBeLessThan(50);
+    });
+
+    it('should reject bounded ambiguous repetition without executing it', () => {
+      // `^(a|aa){1,100}$` slipped past the scanner and hung the probe instead.
+      const start = performance.now();
+      const result = validateRegex('^(a|aa){1,100}$');
+      const elapsed = performance.now() - start;
+
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('performance');
       expect(elapsed).toBeLessThan(50);
     });
 

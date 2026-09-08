@@ -6,9 +6,14 @@
  * `getPageStorage()`, which falls back to a same-origin iframe.
  *
  * Progress is stored per author and per deletion target so that a run in one
- * server cannot clobber the saved cursor of a run in another.
+ * server cannot clobber the saved cursor of a run in another. Two tabs on the
+ * same account and target still share one key, so the last writer wins; what
+ * {@link clearProgress} guarantees is narrower — a completed run only removes
+ * the checkpoint it wrote itself, so finishing in one tab cannot erase a run
+ * still in flight in the other.
  */
 
+import { isValidGuildId, isValidSnowflake } from '../utils/validators';
 import { getPageStorage } from './storage';
 
 // =============================================================================
@@ -29,6 +34,9 @@ const SAVE_INTERVAL = 10;
 
 /** Current schema version. */
 const SCHEMA_VERSION = 2;
+
+/** Clock skew tolerated on a saved timestamp before the entry is refused. */
+const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 // =============================================================================
 // Types
@@ -134,9 +142,29 @@ function removeLegacyEntry(storage: Storage): void {
 // Validation
 // =============================================================================
 
-/** Checks that every value in an array is a finite number. */
-function allFiniteNumbers(values: unknown[]): boolean {
-  return values.every((value) => typeof value === 'number' && Number.isFinite(value));
+/** Checks that a value is a snowflake, or absent. */
+function isAbsentOrSnowflake(value: unknown): boolean {
+  return value === undefined || (typeof value === 'string' && isValidSnowflake(value));
+}
+
+/** Checks that every value in an array is a non-negative integer. */
+function allCounters(values: unknown[]): boolean {
+  return values.every(
+    (value) => typeof value === 'number' && Number.isInteger(value) && value >= 0,
+  );
+}
+
+/**
+ * Checks that a timestamp is a real instant that has already happened.
+ *
+ * A record dated in the future would outlive the expiry window, so anything
+ * beyond {@link MAX_CLOCK_SKEW_MS} ahead of now is treated as corrupt.
+ */
+function isValidTimestamp(value: unknown): boolean {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return false;
+  }
+  return value <= Date.now() + MAX_CLOCK_SKEW_MS;
 }
 
 /** Validates the optional `filters` object of a saved entry. */
@@ -145,7 +173,7 @@ function isValidFilters(value: unknown): value is SavedFilters {
     return false;
   }
   const filters = value as Record<string, unknown>;
-  const strings = ['content', 'pattern', 'minId', 'maxId'] as const;
+  const strings = ['content', 'pattern'] as const;
   const booleans = ['hasLink', 'hasFile', 'includePinned'] as const;
 
   for (const key of strings) {
@@ -158,7 +186,7 @@ function isValidFilters(value: unknown): value is SavedFilters {
       return false;
     }
   }
-  return true;
+  return isAbsentOrSnowflake(filters.minId) && isAbsentOrSnowflake(filters.maxId);
 }
 
 /** Validates the `cursor` object of a saved entry. */
@@ -167,17 +195,14 @@ function isValidCursor(value: unknown): value is SavedProgress['cursor'] {
     return false;
   }
   const cursor = value as Record<string, unknown>;
-  if (cursor.maxId !== undefined && typeof cursor.maxId !== 'string') {
-    return false;
-  }
-  if (cursor.minId !== undefined && typeof cursor.minId !== 'string') {
-    return false;
-  }
-  return true;
+  return isAbsentOrSnowflake(cursor.maxId) && isAbsentOrSnowflake(cursor.minId);
 }
 
 /**
  * Validates the identity fields of a saved entry.
+ *
+ * Author, guild and channel are checked against the snowflake format, not just
+ * the string type: a restored run addresses Discord with these values.
  *
  * @param obj - Parsed entry
  * @returns True when version, run, author, order and target are all sound
@@ -189,20 +214,27 @@ function hasValidIdentity(obj: Record<string, unknown>): boolean {
   if (typeof obj.runId !== 'string' || obj.runId === '') {
     return false;
   }
-  if (typeof obj.authorId !== 'string' || obj.authorId === '') {
+  if (typeof obj.authorId !== 'string' || !isValidSnowflake(obj.authorId)) {
     return false;
   }
   if (obj.deletionOrder !== 'newest' && obj.deletionOrder !== 'oldest') {
     return false;
   }
-  if (obj.guildId !== undefined && typeof obj.guildId !== 'string') {
+  if (
+    obj.guildId !== undefined &&
+    (typeof obj.guildId !== 'string' || !isValidGuildId(obj.guildId))
+  ) {
     return false;
   }
-  return obj.channelId === undefined || typeof obj.channelId === 'string';
+  return isAbsentOrSnowflake(obj.channelId);
 }
 
 /**
- * Runtime type check for a parsed v2 progress entry.
+ * Runtime validation for a parsed v2 progress entry.
+ *
+ * Types alone are not enough: an entry drives real requests once restored, so
+ * IDs must look like snowflakes, counters must be non-negative integers, and
+ * the timestamp must not be in the future.
  *
  * @param data - Value parsed from storage
  * @returns True when the value matches the v2 schema
@@ -220,16 +252,18 @@ export function isValidProgressData(data: unknown): data is SavedProgress {
     return false;
   }
   if (
-    !allFiniteNumbers([
+    !allCounters([
       obj.deletedCount,
       obj.failedCount,
       obj.skippedCount,
       obj.alreadyGoneCount,
       obj.totalFound,
       obj.initialTotalFound,
-      obj.timestamp,
     ])
   ) {
+    return false;
+  }
+  if (!isValidTimestamp(obj.timestamp)) {
     return false;
   }
   return obj.filters === undefined || isValidFilters(obj.filters);
@@ -368,16 +402,30 @@ export function findResumableSession(authorId: string): SavedProgress | null {
 /**
  * Clears saved progress for one author/target pair.
  *
+ * When `runId` is given the entry is only removed if it belongs to that run.
+ * Two tabs on the same account and target share one key, so without the check
+ * a run finishing in one tab would erase the checkpoint of a run still going
+ * in the other.
+ *
  * @param authorId - The current user's ID
  * @param targetKey - Key from {@link targetKeyFor}
+ * @param runId - Only remove the entry when it carries this run ID
  */
-export function clearProgress(authorId: string, targetKey: string): void {
+export function clearProgress(authorId: string, targetKey: string, runId?: string): void {
   const storage = getPageStorage();
   if (!storage) {
     return;
   }
   removeLegacyEntry(storage);
-  removeKey(storage, storageKey(authorId, targetKey));
+  const key = storageKey(authorId, targetKey);
+
+  if (runId) {
+    const entry = readEntry(storage, key);
+    if (entry !== null && entry.runId !== runId) {
+      return;
+    }
+  }
+  removeKey(storage, key);
 }
 
 // =============================================================================

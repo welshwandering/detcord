@@ -312,18 +312,27 @@ describe('DeletionEngine', () => {
     });
 
     it('walks every page and moves the cursor strictly downwards', async () => {
-      const api = new FakeDiscordApi(createMessages(30));
+      const messages = createMessages(30);
+      const api = new FakeDiscordApi(messages);
       const engine = new DeletionEngine(api);
       engine.configure(defaultOptions());
 
       await runToCompletion(engine.start());
 
       expect(engine.getState().deletedCount).toBe(30);
-      const cursors = api.searchLog
-        .map((params) => params.maxId)
-        .filter((id): id is string => id !== undefined);
-      for (let i = 1; i < cursors.length; i++) {
-        expect(BigInt(cursors[i] as string) < BigInt(cursors[i - 1] as string)).toBe(true);
+      // Page one holds the 25 newest; page two the remaining five. Each cursor
+      // is the previous page's oldest id, so nothing is fetched twice.
+      const cursors = api.searchLog.map((params) => params.maxId);
+      expect(cursors).toEqual([
+        undefined,
+        (messages[24] as DiscordMessage).id,
+        (messages[29] as DiscordMessage).id,
+      ]);
+
+      const defined = cursors.filter((id): id is string => id !== undefined);
+      expect(defined.length).toBeGreaterThan(1);
+      for (let i = 1; i < defined.length; i++) {
+        expect(BigInt(defined[i] as string) < BigInt(defined[i - 1] as string)).toBe(true);
       }
     });
 
@@ -398,16 +407,36 @@ describe('DeletionEngine', () => {
       expect(engine.getState().deletedCount).toBe(1);
     });
 
-    it('retries a rate-limited search', async () => {
+    it('retries a rate-limited search with every filter intact', async () => {
       const api = new FakeDiscordApi(createMessages(1));
-      api.searchFailures = [rateLimitError(0.05)];
+      api.searchFailures = [rateLimitError(0.05), rateLimitError(0.05)];
       const engine = new DeletionEngine(api);
-      engine.configure(defaultOptions());
+      engine.configure(
+        defaultOptions({
+          content: 'term',
+          hasLink: true,
+          hasFile: true,
+          includePinned: true,
+          minId: snowflakeAt(0),
+        }),
+      );
 
       await runToCompletion(engine.start());
 
       expect(engine.getState().deletedCount).toBe(1);
-      expect(engine.getStats().throttledCount).toBe(1);
+      expect(engine.getStats().throttledCount).toBe(2);
+      // A retry that rebuilt the params without the filters would widen the
+      // search silently and delete messages the user never asked about.
+      const attempts = api.searchLog.slice(0, 3);
+      expect(attempts[0]).toMatchObject({
+        content: 'term',
+        hasLink: true,
+        hasFile: true,
+        includePinned: true,
+        minId: snowflakeAt(0),
+      });
+      expect(attempts[1]).toEqual(attempts[0]);
+      expect(attempts[2]).toEqual(attempts[0]);
     });
 
     it('waits for the search index on a 202 and reports it', async () => {
@@ -614,6 +643,25 @@ describe('DeletionEngine', () => {
       expect(engine.getState().deletedCount).toBe(1);
     });
 
+    it('issues no request until the exhausted bucket has reset', async () => {
+      const api = new FakeDiscordApi(createMessages(1));
+      api.rateLimit = { remaining: 0, limit: 5, resetAfter: 30 };
+      const engine = new DeletionEngine(api);
+      engine.configure(defaultOptions());
+
+      const run = engine.start();
+      await vi.advanceTimersByTimeAsync(29_000);
+      // Spending a request into an empty bucket buys a 429 and a longer wait.
+      expect(api.searchCount).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(api.searchCount).toBe(1);
+      expect(api.deleteLog).toHaveLength(0);
+
+      engine.stop();
+      await runToCompletion(run);
+    });
+
     it('ignores rate limit headers with a useless resetAfter', async () => {
       const api = new FakeDiscordApi(createMessages(1));
       api.rateLimit = { remaining: 0, limit: 5, resetAfter: 0 };
@@ -812,6 +860,102 @@ describe('DeletionEngine', () => {
       await runToCompletion(run);
       expect(engine.getState().running).toBe(false);
     });
+
+    it('issues no delete when a stop lands during the proactive rate limit wait', async () => {
+      // Reproduction: the abort ended the wait, and execution fell straight
+      // into the DELETE the wait was meant to hold back.
+      const api = new FakeDiscordApi(createMessages(3));
+      const realSearch = api.searchMessages.bind(api);
+      vi.spyOn(api, 'searchMessages').mockImplementation(async (params: SearchParams) => {
+        const response = await realSearch(params);
+        api.rateLimit = { remaining: 0, limit: 5, resetAfter: 30 };
+        return response;
+      });
+      const engine = new DeletionEngine(api);
+      engine.configure(defaultOptions());
+
+      const run = engine.start();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(api.deleteLog).toHaveLength(0);
+
+      engine.stop();
+      await runToCompletion(run);
+
+      expect(api.deleteLog).toHaveLength(0);
+      expect(engine.getState().deletedCount).toBe(0);
+      expect(engine.getState().skippedCount).toBe(0);
+    });
+
+    it('holds a rate limited retry while paused and resumes it afterwards', async () => {
+      const api = new FakeDiscordApi(createMessages(1));
+      api.deleteFailures = [rateLimitError(1)];
+      const engine = new DeletionEngine(api);
+      engine.configure(defaultOptions());
+
+      const run = engine.start();
+      await vi.advanceTimersByTimeAsync(5);
+      expect(api.deleteLog).toHaveLength(1);
+
+      engine.pause();
+      await vi.advanceTimersByTimeAsync(5_000);
+      // The 429 wait is long over; only the pause is holding the retry back.
+      expect(api.deleteLog).toHaveLength(1);
+
+      engine.resume();
+      await runToCompletion(run);
+
+      expect(api.deleteLog).toHaveLength(2);
+      expect(engine.getState().deletedCount).toBe(1);
+    });
+
+    it('records nothing for a message abandoned mid-retry and deletes it once on resume', async () => {
+      const api = new FakeDiscordApi(createMessages(2));
+      api.deleteFailures = [
+        new DiscordApiError('SERVER_ERROR', 'Bad gateway', { httpStatus: 502 }),
+      ];
+      const engine = new DeletionEngine(api);
+      engine.configure(defaultOptions({ searchDelay: 10_000 }));
+
+      const run = engine.start();
+      await vi.advanceTimersByTimeAsync(5);
+      expect(api.deleteLog).toHaveLength(1);
+
+      engine.stop();
+      await runToCompletion(run);
+
+      // A stop during the backoff is not a skip, a failure or a deletion.
+      expect(engine.getState().deletedCount).toBe(0);
+      expect(engine.getState().skippedCount).toBe(0);
+      expect(engine.getState().failedCount).toBe(0);
+
+      const saved = engine.loadSavedSession() as SavedProgress;
+      expect(saved.deletedCount).toBe(0);
+
+      const resumed = new DeletionEngine(api);
+      resumed.configure(defaultOptions());
+      resumed.resumeFromSaved(saved);
+      await runToCompletion(resumed.start());
+
+      expect(api.deletedIds.size).toBe(2);
+      expect(resumed.getState().deletedCount).toBe(2);
+      expect(resumed.getState().skippedCount).toBe(0);
+    });
+
+    it('issues no further delete when stopped during the delete delay', async () => {
+      const api = new FakeDiscordApi(createMessages(5));
+      const engine = new DeletionEngine(api);
+      engine.configure(defaultOptions({ deleteDelay: 1_000, searchDelay: 10_000 }));
+
+      const run = engine.start();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(api.deleteLog).toHaveLength(1);
+
+      engine.stop();
+      await runToCompletion(run);
+
+      expect(api.deleteLog).toHaveLength(1);
+      expect(engine.getState().deletedCount).toBe(1);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -834,7 +978,7 @@ describe('DeletionEngine', () => {
       expect(preview.estimatedTimeMs).toBeGreaterThan(0);
     });
 
-    it('reports no filtering when nothing can be excluded', async () => {
+    it('reports no filtering when the sample is the whole result set', async () => {
       const api = new FakeDiscordApi(createMessages(2));
       const engine = new DeletionEngine(api);
       engine.configure(defaultOptions({ includePinned: true }));
@@ -845,12 +989,27 @@ describe('DeletionEngine', () => {
       expect(preview.sampleMessages).toHaveLength(2);
     });
 
-    it('flags filtering when pinned messages are excluded by default', async () => {
-      const api = new FakeDiscordApi(createMessages(2));
+    it('flags filtering when a sampled message is excluded', async () => {
+      const messages = createMessages(2);
+      (messages[0] as DiscordMessage).pinned = true;
+      const api = new FakeDiscordApi(messages);
       const engine = new DeletionEngine(api);
       engine.configure(defaultOptions());
 
       expect((await engine.preview()).filtersApplied).toBe(true);
+    });
+
+    it('flags filtering when the result set is larger than the sampled page', async () => {
+      // Nothing in the first page is excluded, but the unseen remainder still
+      // can be: reporting an exact count there would overstate the run.
+      const api = new FakeDiscordApi(createMessages(30));
+      const engine = new DeletionEngine(api);
+      engine.configure(defaultOptions({ includePinned: true }));
+
+      const preview = await engine.preview();
+
+      expect(preview.totalCount).toBe(30);
+      expect(preview.filtersApplied).toBe(true);
     });
 
     it('caps the sample at ten messages', async () => {
@@ -1008,6 +1167,34 @@ describe('DeletionEngine', () => {
       expect(resumed.hasSavedSession()).toBe(false);
     });
 
+    it('saves at exactly ten deletions and again on stop', async () => {
+      const storage = createMemoryStorage();
+      const setItem = vi.spyOn(storage, 'setItem');
+      storageState.current = storage;
+
+      const api = new FakeDiscordApi(createMessages(12));
+      const engine = new DeletionEngine(api);
+      engine.configure(defaultOptions({ deleteDelay: 1000, searchDelay: 10_000 }));
+
+      const run = engine.start();
+      await vi.advanceTimersByTimeAsync(8500);
+      expect(api.deleteLog).toHaveLength(9);
+      expect(setItem).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(api.deleteLog).toHaveLength(10);
+      expect(setItem).toHaveBeenCalledTimes(1);
+      const written = JSON.parse(setItem.mock.calls[0]?.[1] ?? '{}') as SavedProgress;
+      expect(written.deletedCount).toBe(10);
+
+      const savesBeforeStop = setItem.mock.calls.length;
+      engine.stop();
+      await runToCompletion(run);
+
+      expect(setItem.mock.calls.length).toBeGreaterThan(savesBeforeStop);
+      expect(engine.loadSavedSession()?.deletedCount).toBe(10);
+    });
+
     it('clears the saved session when the run completes', async () => {
       const api = new FakeDiscordApi(createMessages(2));
       const engine = new DeletionEngine(api);
@@ -1016,6 +1203,23 @@ describe('DeletionEngine', () => {
       await runToCompletion(engine.start());
 
       expect(engine.hasSavedSession()).toBe(false);
+    });
+
+    it('leaves a checkpoint written by another run in place on completion', async () => {
+      // Same account, same channel, second tab: completing here must not wipe
+      // the cursor the other run is still using.
+      const storage = createMemoryStorage();
+      storageState.current = storage;
+      const foreign = savedSession({ runId: 'other-tab', deletedCount: 7 });
+      storage.setItem(`detcord_progress:v2:${AUTHOR_ID}:c:${CHANNEL_ID}`, JSON.stringify(foreign));
+
+      const api = new FakeDiscordApi(createMessages(2));
+      const engine = new DeletionEngine(api);
+      engine.configure(defaultOptions());
+
+      await runToCompletion(engine.start());
+
+      expect(engine.loadSavedSession()?.runId).toBe('other-tab');
     });
 
     it('saves an oldest-first cursor one past the last deleted id', async () => {
@@ -1171,6 +1375,30 @@ describe('DeletionEngine', () => {
 
       expect(changes.length).toBeGreaterThan(1);
       expect(engine.getState().deletedCount).toBe(8);
+    });
+
+    it('gives back a tenth of the current delay after five clean deletions', async () => {
+      // Jitter fixed at its floor so the throttled delay lands on exactly 2s:
+      // 2.95s retry_after + 50ms jitter = 3s, half the gap above the 1s
+      // baseline. Five clean deletions must then return 10% of 2000, not 10%
+      // of the 1000ms gap above baseline.
+      const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+      try {
+        const api = new FakeDiscordApi(createMessages(5));
+        api.deleteFailures = [rateLimitError(2.95)];
+        const changes: Array<{ isThrottled: boolean; currentDelay: number }> = [];
+        const engine = new DeletionEngine(api);
+        engine.setCallbacks({ onRateLimitChange: (info) => changes.push(info) });
+        engine.configure(defaultOptions());
+
+        await runToCompletion(engine.start(), 1200);
+
+        expect(engine.getState().deletedCount).toBe(5);
+        expect(changes[0]).toEqual({ isThrottled: true, currentDelay: 2000 });
+        expect(changes[1]).toEqual({ isThrottled: true, currentDelay: 1800 });
+      } finally {
+        random.mockRestore();
+      }
     });
 
     it('fires onStart once with the initial state', async () => {
