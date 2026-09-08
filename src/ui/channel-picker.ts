@@ -14,6 +14,26 @@ export interface PickerChannel {
   name: string;
 }
 
+/**
+ * Reads a channel name back off the rendered picker rows.
+ *
+ * The picker is the only part of the UI that ever learns a channel's name, so
+ * the summary line and the review receipt look it up here rather than
+ * carrying names through the run config.
+ *
+ * @param root - Element containing the picker markup
+ * @param id - Channel ID to resolve
+ * @returns The channel name, or undefined when the picker has not loaded it
+ */
+export function channelNameFromDom(root: ParentNode, id: string): string | undefined {
+  for (const row of root.querySelectorAll('[data-channel-id]')) {
+    if (row.getAttribute('data-channel-id') === id) {
+      return row.querySelector(`.${CSS_PREFIX}-channel-name`)?.textContent?.trim() || undefined;
+    }
+  }
+  return undefined;
+}
+
 /** Dependencies handed to the picker. */
 export interface ChannelPickerOptions {
   /** Element containing the picker markup. */

@@ -141,7 +141,7 @@ export const WINDOW_TEMPLATE = `
 			</li>
 			<li class="detcord-step" data-step="3">
 				<span class="detcord-step-number">3</span>
-				<span class="detcord-step-label">Preview</span>
+				<span class="detcord-step-label">Review</span>
 			</li>
 			<li class="detcord-step" data-step="4">
 				<span class="detcord-step-number">4</span>
@@ -160,7 +160,7 @@ export const WINDOW_TEMPLATE = `
 		data-screen="1"
 		aria-labelledby="screen1-title"
 	>
-		<h2 id="screen1-title" class="detcord-screen-title">Select Target</h2>
+		<h2 id="screen1-title" class="detcord-screen-title">Target</h2>
 		<p class="detcord-screen-desc">Choose where to delete your messages from.</p>
 
 		<div class="detcord-cards" role="radiogroup" aria-label="Deletion target">
@@ -173,8 +173,8 @@ export const WINDOW_TEMPLATE = `
 				tabindex="0"
 			>
 				<span class="detcord-card-icon">${ICONS.channel}</span>
-				<span class="detcord-card-title">Current Channel</span>
-				<span class="detcord-card-desc">Delete messages from this channel only</span>
+				<span class="detcord-card-title">Channel</span>
+				<span class="detcord-card-desc">Current channel</span>
 			</button>
 
 			<button
@@ -186,8 +186,8 @@ export const WINDOW_TEMPLATE = `
 				tabindex="0"
 			>
 				<span class="detcord-card-icon">${ICONS.server}</span>
-				<span class="detcord-card-title">Entire Server</span>
-				<span class="detcord-card-desc">Delete messages from all channels in this server</span>
+				<span class="detcord-card-title">Whole server</span>
+				<span class="detcord-card-desc">Every channel you can see</span>
 			</button>
 
 			<button
@@ -199,8 +199,8 @@ export const WINDOW_TEMPLATE = `
 				tabindex="0"
 			>
 				<span class="detcord-card-icon">${ICONS.dm}</span>
-				<span class="detcord-card-title">DM Channel</span>
-				<span class="detcord-card-desc">Delete messages from this DM conversation</span>
+				<span class="detcord-card-title">DM</span>
+				<span class="detcord-card-desc">This conversation</span>
 			</button>
 		</div>
 
@@ -212,7 +212,7 @@ export const WINDOW_TEMPLATE = `
 				disabled
 				aria-disabled="true"
 			>
-				Next ${ICONS.chevronRight}
+				Continue
 			</button>
 		</footer>
 	</section>
@@ -224,12 +224,12 @@ export const WINDOW_TEMPLATE = `
 		aria-labelledby="screen2-title"
 		hidden
 	>
-		<h2 id="screen2-title" class="detcord-screen-title">Filter Messages</h2>
+		<h2 id="screen2-title" class="detcord-screen-title">Filters</h2>
 		<p class="detcord-screen-desc">Narrow down which messages to delete.</p>
 
 		<form class="detcord-form" data-form="filters">
 			<fieldset class="detcord-fieldset">
-				<legend class="detcord-legend">Date Range</legend>
+				<legend class="detcord-legend">Range</legend>
 				<div class="detcord-field-row">
 					<div class="detcord-field">
 						<label for="filter-date-from" class="detcord-label">From</label>
@@ -267,17 +267,17 @@ export const WINDOW_TEMPLATE = `
 			</fieldset>
 
 			<fieldset class="detcord-fieldset">
-				<legend class="detcord-legend">Message Type</legend>
+				<legend class="detcord-legend">Only messages with</legend>
 				<div class="detcord-checkbox-group">
 					<label class="detcord-checkbox">
 						<input type="checkbox" data-filter="hasLink" />
 						<span class="detcord-checkbox-box"></span>
-						<span class="detcord-checkbox-label">Has link</span>
+						<span class="detcord-checkbox-label">Links</span>
 					</label>
 					<label class="detcord-checkbox">
 						<input type="checkbox" data-filter="hasFile" />
 						<span class="detcord-checkbox-box"></span>
-						<span class="detcord-checkbox-label">Has attachment</span>
+						<span class="detcord-checkbox-label">Attachments</span>
 					</label>
 					<label class="detcord-checkbox">
 						<input type="checkbox" data-filter="includePinned" />
@@ -288,10 +288,10 @@ export const WINDOW_TEMPLATE = `
 			</fieldset>
 
 			<details class="detcord-advanced">
-				<summary class="detcord-advanced-summary">Advanced Options</summary>
+				<summary class="detcord-advanced-summary">Advanced options</summary>
 				<div class="detcord-advanced-content">
 					<fieldset class="detcord-fieldset">
-						<legend class="detcord-legend">Deletion Order</legend>
+						<legend class="detcord-legend">Deletion order</legend>
 						<div class="detcord-radio-group">
 							<label class="detcord-radio">
 								<input type="radio" name="deletionOrder" value="newest" data-filter="deletionOrder" checked />
@@ -352,10 +352,10 @@ export const WINDOW_TEMPLATE = `
 
 		<footer class="detcord-screen-footer">
 			<button type="button" class="detcord-btn" data-action="back">
-				${ICONS.chevronLeft} Back
+				Back
 			</button>
 			<button type="button" class="detcord-btn detcord-btn-primary" data-action="next">
-				Next ${ICONS.chevronRight}
+				Continue
 			</button>
 		</footer>
 	</section>
@@ -367,8 +367,8 @@ export const WINDOW_TEMPLATE = `
 		aria-labelledby="screen3-title"
 		hidden
 	>
-		<h2 id="screen3-title" class="detcord-screen-title">Preview</h2>
-		<p class="detcord-screen-desc">Review before starting deletion.</p>
+		<h2 id="screen3-title" class="detcord-screen-title">Review</h2>
+		<p class="detcord-screen-desc">Check this before anything is deleted.</p>
 
 		<div class="detcord-preview">
 			<div class="detcord-preview-stats">
@@ -383,7 +383,7 @@ export const WINDOW_TEMPLATE = `
 			</div>
 
 			<div class="detcord-preview-messages" data-container="sampleMessages">
-				<p class="detcord-preview-loading" data-loading="preview">Searching for messages...</p>
+				<p class="detcord-preview-loading" data-loading="preview">Counting messages&hellip;</p>
 			</div>
 
 			<div class="detcord-warning" role="alert">
@@ -394,7 +394,7 @@ export const WINDOW_TEMPLATE = `
 
 		<footer class="detcord-screen-footer">
 			<button type="button" class="detcord-btn" data-action="back">
-				${ICONS.chevronLeft} Back
+				Back
 			</button>
 			<button
 				type="button"
@@ -403,7 +403,7 @@ export const WINDOW_TEMPLATE = `
 				disabled
 				aria-disabled="true"
 			>
-				${ICONS.bomb} Start Deletion
+				Delete messages
 			</button>
 		</footer>
 	</section>
@@ -415,7 +415,7 @@ export const WINDOW_TEMPLATE = `
 		aria-labelledby="screen4-title"
 		hidden
 	>
-		<h2 id="screen4-title" class="detcord-screen-title">Deleting Messages</h2>
+		<h2 id="screen4-title" class="detcord-screen-title">Deleting</h2>
 
 		<div class="detcord-progress-container">
 			<div class="detcord-progress-ring" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
@@ -487,7 +487,7 @@ export const WINDOW_TEMPLATE = `
 		aria-labelledby="screen5-title"
 		hidden
 	>
-		<h2 id="screen5-title" class="detcord-screen-title">Complete!</h2>
+		<h2 id="screen5-title" class="detcord-screen-title">Done</h2>
 
 		<div class="detcord-complete">
 			<div class="detcord-complete-icon" aria-hidden="true">
@@ -506,13 +506,13 @@ export const WINDOW_TEMPLATE = `
 			</div>
 
 			<p class="detcord-complete-message" data-container="completeMessage">
-				Your messages have been successfully deleted.
+				Your messages have been deleted.
 			</p>
 		</div>
 
 		<footer class="detcord-screen-footer">
 			<button type="button" class="detcord-btn" data-action="restart">
-				Delete More
+				Delete more
 			</button>
 			<button type="button" class="detcord-btn detcord-btn-primary" data-action="close">
 				Done
@@ -699,7 +699,7 @@ export function createPreviewScreenContent(
   // Sample messages section (if any)
   if (sampleMessages.length > 0) {
     const sampleHeader = createElement('h3', { class: 'screen-title text-small mt-16 mb-8' }, [
-      'Sample Messages',
+      'Preview',
     ]);
     fragment.appendChild(sampleHeader);
 

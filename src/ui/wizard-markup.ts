@@ -4,47 +4,131 @@
  * Split out of window-markup.ts so the screens can evolve independently.
  * Every data-action / data-bind / data-input name here is a contract with
  * controller.ts and the tests; add names, do not rename them.
+ *
+ * Choice rows are real buttons: the controller delegates clicks, so a button
+ * gets keyboard operation for free, which a clickable div cannot.
  */
 
 import { CSS_PREFIX, SHOW_OLDEST_FIRST } from './constants';
 
+/** One target or time-range choice: label on the left, hint on the right. */
+interface ChoiceRow {
+  /** Value written to `data-target` or `data-timerange`. */
+  readonly value: string;
+  readonly label: string;
+  readonly hint: string;
+  /** `data-bind` name, for rows the controller shows and hides. */
+  readonly bind?: string;
+}
+
+const TARGET_ROWS: readonly ChoiceRow[] = [
+  { value: 'channel', label: 'Channel', hint: 'Current channel' },
+  { value: 'server', label: 'Whole server', hint: 'Every channel you can see', bind: 'serverCard' },
+  { value: 'dm', label: 'DM', hint: 'This conversation', bind: 'dmCard' },
+  { value: 'specific', label: 'Specific channels', hint: 'Pick channels' },
+];
+
+const TIME_RANGE_ROWS: readonly ChoiceRow[] = [
+  { value: 'all', label: 'Everything', hint: 'All time' },
+  { value: '24h', label: 'Last 24 hours', hint: '24 h' },
+  { value: '72h', label: 'Last 3 days', hint: '72 h' },
+  { value: '30d', label: 'Last 30 days', hint: '30 d' },
+  { value: 'older-30d', label: 'Older than 30 days', hint: 'Over 30 d' },
+  { value: 'older-90d', label: 'Older than 90 days', hint: 'Over 90 d' },
+  { value: 'custom', label: 'Custom range', hint: 'Pick dates' },
+];
+
+/** Element classes for one family of choice rows. */
+interface RowClasses {
+  readonly row: string;
+  readonly label: string;
+  readonly hint: string;
+}
+
+const TARGET_CLASSES: RowClasses = {
+  row: `${CSS_PREFIX}-card`,
+  label: `${CSS_PREFIX}-card-title`,
+  hint: `${CSS_PREFIX}-card-desc`,
+};
+
+const RANGE_CLASSES: RowClasses = {
+  row: `${CSS_PREFIX}-option`,
+  label: `${CSS_PREFIX}-option-label`,
+  hint: `${CSS_PREFIX}-option-hint`,
+};
+
+/**
+ * Builds one choice row.
+ *
+ * @param row - The choice to render
+ * @param attribute - `data-target` or `data-timerange`
+ * @param action - `data-action` the controller dispatches on
+ * @param classes - Classes for the row and its two slots
+ * @param selected - Whether this row starts selected
+ * @returns HTML for the row
+ */
+function choiceRowHTML(
+  row: ChoiceRow,
+  attribute: string,
+  action: string,
+  classes: RowClasses,
+  selected: boolean,
+): string {
+  const bind = row.bind ? ` data-bind="${row.bind}"` : '';
+  return `
+					<button type="button" class="${classes.row}${selected ? ' selected' : ''}" ${attribute}="${row.value}" data-action="${action}"${bind} role="radio" aria-checked="${selected}">
+						<span class="${classes.label}">${row.label}</span>
+						<span class="${classes.hint}">${row.hint}</span>
+					</button>`;
+}
+
+/**
+ * Builds a family of choice rows.
+ *
+ * @param rows - Choices to render, in order
+ * @param attribute - `data-target` or `data-timerange`
+ * @param action - `data-action` the controller dispatches on
+ * @param classes - Classes for the row and its two slots
+ * @returns HTML for every row
+ */
+function choiceRowsHTML(
+  rows: readonly ChoiceRow[],
+  attribute: string,
+  action: string,
+  classes: RowClasses,
+): string {
+  return rows
+    .map((row, index) => choiceRowHTML(row, attribute, action, classes, index === 0))
+    .join('');
+}
+
 /** HTML for the four wizard steps, placed inside the setup screen. */
 export function createWizardStepsHTML(): string {
+  const targets = choiceRowsHTML(TARGET_ROWS, 'data-target', 'selectTarget', TARGET_CLASSES);
+  const ranges = choiceRowsHTML(
+    TIME_RANGE_ROWS,
+    'data-timerange',
+    'selectTimeRange',
+    RANGE_CLASSES,
+  );
+
   return `
+			<div class="${CSS_PREFIX}-wizard-summary" data-bind="wizardSummary"></div>
+
 			<!-- Step 1: Location -->
 			<div class="${CSS_PREFIX}-wizard-step active" data-wizard-step="location">
-				<h3 class="${CSS_PREFIX}-step-title">Where should we clean?</h3>
+				<h3 class="${CSS_PREFIX}-step-title">Target</h3>
 
-				<div class="${CSS_PREFIX}-cards">
-					<div class="${CSS_PREFIX}-card selected" data-target="channel" data-action="selectTarget">
-						<div class="${CSS_PREFIX}-card-icon">📺</div>
-						<div class="${CSS_PREFIX}-card-title">Channel</div>
-						<div class="${CSS_PREFIX}-card-desc">Current channel</div>
-					</div>
-					<div class="${CSS_PREFIX}-card" data-target="server" data-action="selectTarget" data-bind="serverCard">
-						<div class="${CSS_PREFIX}-card-icon">🏰</div>
-						<div class="${CSS_PREFIX}-card-title">Whole Server</div>
-						<div class="${CSS_PREFIX}-card-desc">All your messages</div>
-					</div>
-					<div class="${CSS_PREFIX}-card" data-target="dm" data-action="selectTarget" data-bind="dmCard">
-						<div class="${CSS_PREFIX}-card-icon">💬</div>
-						<div class="${CSS_PREFIX}-card-title">DM</div>
-						<div class="${CSS_PREFIX}-card-desc">This conversation</div>
-					</div>
-					<div class="${CSS_PREFIX}-card" data-target="specific" data-action="selectTarget">
-						<div class="${CSS_PREFIX}-card-icon">🎯</div>
-						<div class="${CSS_PREFIX}-card-title">Specific</div>
-						<div class="${CSS_PREFIX}-card-desc">Pick channels</div>
-					</div>
+				<div class="${CSS_PREFIX}-cards" role="radiogroup" aria-label="Where to delete from">${targets}
 				</div>
 
 				<div class="${CSS_PREFIX}-channel-picker" data-bind="channelPicker">
-					<input type="text" class="${CSS_PREFIX}-channel-search" data-input="channelSearch" placeholder="Search channels...">
+					<input type="text" class="${CSS_PREFIX}-channel-search" data-input="channelSearch" placeholder="Search channels" aria-label="Search channels">
 					<div class="${CSS_PREFIX}-channel-list" data-bind="channelList"></div>
 					<div class="${CSS_PREFIX}-selected-count" data-bind="selectedChannelCount"></div>
 				</div>
 				<div class="${CSS_PREFIX}-manual-input" data-bind="manualIdContainer">
-					<input type="text" data-input="manualChannelId" placeholder="Or enter channel ID manually...">
+					<input type="text" data-input="manualChannelId" placeholder="Or enter a channel ID" aria-label="Channel ID">
 				</div>
 
 				<div class="${CSS_PREFIX}-inline-error" data-bind="locationError"></div>
@@ -58,49 +142,14 @@ export function createWizardStepsHTML(): string {
 
 			<!-- Step 2: Time Range -->
 			<div class="${CSS_PREFIX}-wizard-step" data-wizard-step="timerange">
-				<h3 class="${CSS_PREFIX}-step-title">How far back?</h3>
+				<h3 class="${CSS_PREFIX}-step-title">Range</h3>
 
-				<div class="${CSS_PREFIX}-options">
-					<div class="${CSS_PREFIX}-option selected" data-timerange="all" data-action="selectTimeRange">
-						<div class="${CSS_PREFIX}-option-radio"></div>
-						<div class="${CSS_PREFIX}-option-label">Everything</div>
-						<div class="${CSS_PREFIX}-option-hint">∞</div>
-					</div>
-					<div class="${CSS_PREFIX}-option" data-timerange="24h" data-action="selectTimeRange">
-						<div class="${CSS_PREFIX}-option-radio"></div>
-						<div class="${CSS_PREFIX}-option-label">Last 24 hours</div>
-						<div class="${CSS_PREFIX}-option-hint">24h</div>
-					</div>
-					<div class="${CSS_PREFIX}-option" data-timerange="72h" data-action="selectTimeRange">
-						<div class="${CSS_PREFIX}-option-radio"></div>
-						<div class="${CSS_PREFIX}-option-label">Last 3 days</div>
-						<div class="${CSS_PREFIX}-option-hint">72h</div>
-					</div>
-					<div class="${CSS_PREFIX}-option" data-timerange="30d" data-action="selectTimeRange">
-						<div class="${CSS_PREFIX}-option-radio"></div>
-						<div class="${CSS_PREFIX}-option-label">Last 30 days</div>
-						<div class="${CSS_PREFIX}-option-hint">30d</div>
-					</div>
-					<div class="${CSS_PREFIX}-option" data-timerange="older-30d" data-action="selectTimeRange">
-						<div class="${CSS_PREFIX}-option-radio"></div>
-						<div class="${CSS_PREFIX}-option-label">Older than 30 days</div>
-						<div class="${CSS_PREFIX}-option-hint">&gt;30d</div>
-					</div>
-					<div class="${CSS_PREFIX}-option" data-timerange="older-90d" data-action="selectTimeRange">
-						<div class="${CSS_PREFIX}-option-radio"></div>
-						<div class="${CSS_PREFIX}-option-label">Older than 90 days</div>
-						<div class="${CSS_PREFIX}-option-hint">&gt;90d</div>
-					</div>
-					<div class="${CSS_PREFIX}-option" data-timerange="custom" data-action="selectTimeRange">
-						<div class="${CSS_PREFIX}-option-radio"></div>
-						<div class="${CSS_PREFIX}-option-label">Custom range</div>
-						<div class="${CSS_PREFIX}-option-hint">📅</div>
-					</div>
+				<div class="${CSS_PREFIX}-options" role="radiogroup" aria-label="How far back to go">${ranges}
 				</div>
 
 				<div class="${CSS_PREFIX}-date-range" data-bind="dateRangeContainer">
-					<input type="date" data-input="afterDate" placeholder="From">
-					<input type="date" data-input="beforeDate" placeholder="To">
+					<input type="date" data-input="afterDate" aria-label="From date">
+					<input type="date" data-input="beforeDate" aria-label="To date">
 				</div>
 
 				<div class="${CSS_PREFIX}-inline-error" data-bind="timeRangeError"></div>
@@ -115,17 +164,21 @@ export function createWizardStepsHTML(): string {
 
 			<!-- Step 3: Filters -->
 			<div class="${CSS_PREFIX}-wizard-step" data-wizard-step="filters">
-				<h3 class="${CSS_PREFIX}-step-title">Any filters?</h3>
+				<h3 class="${CSS_PREFIX}-step-title">Filters</h3>
 
 				<div class="${CSS_PREFIX}-toggles">
+					<div class="${CSS_PREFIX}-toggle-group-label">Only messages with</div>
 					<div class="${CSS_PREFIX}-toggle">
-						<span class="${CSS_PREFIX}-toggle-label">Only with links</span>
+						<span class="${CSS_PREFIX}-toggle-label">Links</span>
 						<div class="${CSS_PREFIX}-toggle-switch" data-toggle="hasLink" data-action="toggleFilter"></div>
 					</div>
 					<div class="${CSS_PREFIX}-toggle">
-						<span class="${CSS_PREFIX}-toggle-label">Only with attachments</span>
+						<span class="${CSS_PREFIX}-toggle-label">Attachments</span>
 						<div class="${CSS_PREFIX}-toggle-switch" data-toggle="hasFile" data-action="toggleFilter"></div>
 					</div>
+				</div>
+
+				<div class="${CSS_PREFIX}-toggles">
 					<div class="${CSS_PREFIX}-toggle">
 						<span class="${CSS_PREFIX}-toggle-label">Include pinned messages</span>
 						<div class="${CSS_PREFIX}-toggle-switch" data-toggle="includePinned" data-action="toggleFilter"></div>
@@ -147,13 +200,13 @@ export function createWizardStepsHTML(): string {
 				</div>
 
 				<div class="${CSS_PREFIX}-filter-input">
-					<label>Text filter (optional)</label>
-					<input type="text" data-input="contentFilter" placeholder="Messages containing...">
+					<label for="${CSS_PREFIX}-content-filter">Text filter (optional)</label>
+					<input type="text" id="${CSS_PREFIX}-content-filter" data-input="contentFilter" placeholder="Messages containing">
 				</div>
 
 				<div class="${CSS_PREFIX}-filter-input">
-					<label>Regex pattern (optional)</label>
-					<input type="text" data-input="pattern" placeholder="e.g. ^gg$">
+					<label for="${CSS_PREFIX}-pattern-filter">Regex pattern (optional)</label>
+					<input type="text" id="${CSS_PREFIX}-pattern-filter" data-input="pattern" placeholder="e.g. ^gg$">
 				</div>
 
 				<div class="${CSS_PREFIX}-inline-error" data-bind="patternError"></div>
@@ -168,20 +221,19 @@ export function createWizardStepsHTML(): string {
 
 			<!-- Step 4: Review -->
 			<div class="${CSS_PREFIX}-wizard-step" data-wizard-step="review">
-				<h3 class="${CSS_PREFIX}-step-title">Ready to sweep</h3>
+				<h3 class="${CSS_PREFIX}-step-title">Review</h3>
 
-				<div class="${CSS_PREFIX}-summary">
-					<div class="${CSS_PREFIX}-summary-count" data-bind="reviewCount">...</div>
-					<div class="${CSS_PREFIX}-summary-label" data-bind="reviewCountLabel">messages found</div>
-					<div class="${CSS_PREFIX}-summary-details" data-bind="reviewDetails">Scanning...</div>
+				<div class="${CSS_PREFIX}-summary" data-bind="reviewSummary">
+					<div class="${CSS_PREFIX}-summary-count" data-bind="reviewCount">&mdash;</div>
+					<div class="${CSS_PREFIX}-summary-label" data-bind="reviewCountLabel">messages will be deleted</div>
+					<div class="${CSS_PREFIX}-summary-details" data-bind="reviewDetails"></div>
+					<dl class="${CSS_PREFIX}-review-summary" data-bind="reviewRows"></dl>
 				</div>
-
-				<dl class="${CSS_PREFIX}-review-summary" data-bind="reviewSummary"></dl>
 
 				<div class="${CSS_PREFIX}-preview-list" data-bind="previewList">
 					<div class="${CSS_PREFIX}-preview-label">Preview</div>
 					<div class="${CSS_PREFIX}-preview-messages" data-bind="previewContent">
-						<div class="${CSS_PREFIX}-preview-msg">Scanning messages...</div>
+						<div class="${CSS_PREFIX}-preview-msg">Counting messages&hellip;</div>
 					</div>
 				</div>
 
@@ -190,7 +242,7 @@ export function createWizardStepsHTML(): string {
 				<div class="${CSS_PREFIX}-btn-group">
 					<button class="${CSS_PREFIX}-btn ${CSS_PREFIX}-btn-ghost" data-action="prevStep">Back</button>
 					<button class="${CSS_PREFIX}-btn ${CSS_PREFIX}-btn-sweep" data-action="confirmDelete" data-bind="confirmButton" style="flex: 1;" disabled>
-						🧹 Begin Sweep
+						<span data-bind="confirmLabel">Delete messages</span>
 					</button>
 				</div>
 			</div>

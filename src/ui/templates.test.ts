@@ -226,6 +226,16 @@ describe('templates module', () => {
       expect(container.textContent).toContain('42');
     });
 
+    it('heads the sample list as a preview', () => {
+      const content = createPreviewScreenContent(10, '30 seconds', [
+        { id: '1', content: 'First message', timestamp: '2024-01-15T12:00:00Z' },
+      ]);
+      const container = document.createElement('div');
+      container.appendChild(content);
+      expect(container.textContent).toContain('Preview');
+      expect(container.textContent).toContain('messages will be deleted');
+    });
+
     it('displays sample messages', () => {
       const messages = [
         { id: '1', content: 'First message', timestamp: '2024-01-15T12:00:00Z' },
@@ -332,6 +342,27 @@ describe('templates module', () => {
 
     it('contains aria-modal attribute', () => {
       expect(WINDOW_TEMPLATE).toContain('aria-modal');
+    });
+
+    it('titles its steps as statements', () => {
+      const labels = [...WINDOW_TEMPLATE.matchAll(/detcord-step-label">([^<]+)</g)].map(
+        (match) => match[1],
+      );
+      expect(labels).toEqual(['Target', 'Filters', 'Review', 'Progress', 'Done']);
+    });
+
+    it('names its actions plainly', () => {
+      expect(WINDOW_TEMPLATE).toContain('Continue');
+      expect(WINDOW_TEMPLATE).toContain('Delete messages');
+      expect(WINDOW_TEMPLATE).not.toContain('Start Deletion');
+      expect(WINDOW_TEMPLATE).not.toContain('Complete!');
+    });
+
+    it('offers targets as a label and a one-line hint', () => {
+      const fragment = parseTemplate(WINDOW_TEMPLATE);
+      const card = fragment.querySelector('[data-target="channel"]');
+      expect(card?.querySelector('.detcord-card-title')?.textContent).toBe('Channel');
+      expect(card?.querySelector('.detcord-card-desc')?.textContent).toBe('Current channel');
     });
   });
 });

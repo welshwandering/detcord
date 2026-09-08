@@ -7,11 +7,13 @@
  * behind it says otherwise.
  */
 
+import { getChannelIdFromUrl } from '../core/token';
 import {
   parseLocalDateEnd as parseLocalDateEndStrict,
   parseLocalDateStart as parseLocalDateStartStrict,
 } from '../utils/helpers';
 import { validateRegex } from '../utils/validators';
+import { channelNameFromDom } from './channel-picker';
 import { SHOW_OLDEST_FIRST } from './constants';
 import type { DeletionOrder } from './ports';
 import type { TargetScope } from './run-config';
@@ -52,6 +54,17 @@ export const TIME_RANGE_LABELS: Record<TimeRangeId, string> = {
   'older-30d': 'Older than 30 days',
   'older-90d': 'Older than 90 days',
   custom: 'Custom range',
+};
+
+/** Mid-sentence wording for each preset, used by the summary line. */
+const TIME_RANGE_SUMMARY: Record<TimeRangeId, string> = {
+  all: 'all time',
+  '24h': 'last 24 hours',
+  '72h': 'last 3 days',
+  '30d': 'last 30 days',
+  'older-30d': 'older than 30 days',
+  'older-90d': 'older than 90 days',
+  custom: 'custom range',
 };
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -182,6 +195,128 @@ function inputEl(root: ParentNode, name: string): HTMLInputElement | null {
   return root.querySelector<HTMLInputElement>(`[data-input="${name}"]`);
 }
 
+/** What the summary line needs to know that wizard state cannot tell it. */
+export interface WizardSummaryContext {
+  /** Channel the page is on, when Detcord can see one. */
+  currentChannelId?: string | null;
+  /** Resolves a channel ID to its Discord name, when something knows it. */
+  channelName?: (id: string) => string | undefined;
+}
+
+/** Longest filter text quoted in the summary line before it is cut short. */
+const MAX_SUMMARY_FILTER_LENGTH = 24;
+
+function shorten(text: string): string {
+  return text.length > MAX_SUMMARY_FILTER_LENGTH
+    ? `${text.slice(0, MAX_SUMMARY_FILTER_LENGTH)}\u2026`
+    : text;
+}
+
+function channelRef(id: string | null | undefined, ctx: WizardSummaryContext): string {
+  if (!id) {
+    return 'this channel';
+  }
+  const name = ctx.channelName?.(id)?.trim();
+  return name ? `#${name}` : id;
+}
+
+function describeSelectedChannels(state: WizardState, ctx: WizardSummaryContext): string {
+  const ids = [...state.selectedChannels];
+  const manual = state.manualChannelId.trim();
+  if (manual && !ids.includes(manual)) {
+    ids.push(manual);
+  }
+  if (ids.length === 0) {
+    return 'no channels picked';
+  }
+  return ids.length === 1 ? channelRef(ids[0], ctx) : `${ids.length} channels`;
+}
+
+function describeSummaryTarget(state: WizardState, ctx: WizardSummaryContext): string {
+  if (state.target === 'dm') {
+    return 'this DM';
+  }
+  if (state.target === 'server') {
+    return 'every channel in this server';
+  }
+  if (state.target === 'specific') {
+    return describeSelectedChannels(state, ctx);
+  }
+  return channelRef(ctx.currentChannelId, ctx);
+}
+
+function describeSummaryRange(state: WizardState): string {
+  if (state.timeRange !== 'custom') {
+    return TIME_RANGE_SUMMARY[state.timeRange];
+  }
+  const after = state.customAfter.trim();
+  const before = state.customBefore.trim();
+  if (after && before) {
+    return `${after} to ${before}`;
+  }
+  if (after) {
+    return `after ${after}`;
+  }
+  return before ? `before ${before}` : TIME_RANGE_SUMMARY.custom;
+}
+
+function describeSummaryFilters(state: WizardState): string {
+  const parts: string[] = [];
+  const content = state.content.trim();
+  const pattern = state.pattern.trim();
+  if (content) {
+    parts.push(`containing "${shorten(content)}"`);
+  }
+  if (pattern) {
+    parts.push(`matching /${shorten(pattern)}/`);
+  }
+  if (state.hasLink) {
+    parts.push('with links');
+  }
+  if (state.hasFile) {
+    parts.push('with attachments');
+  }
+  parts.push(state.includePinned ? 'pinned included' : 'pinned kept');
+  return parts.join(', ');
+}
+
+/**
+ * Describes the whole wizard selection in one line.
+ *
+ * The line sits under the step indicator for the length of the wizard, so a
+ * choice made on step one is still visible on step four.
+ *
+ * @param state - Current wizard state
+ * @param ctx - What the caller knows about channels
+ * @returns A line such as "#general \u00B7 last 30 days \u00B7 with links, pinned kept"
+ */
+export function describeWizardSummary(state: WizardState, ctx: WizardSummaryContext = {}): string {
+  return [
+    describeSummaryTarget(state, ctx),
+    describeSummaryRange(state),
+    describeSummaryFilters(state),
+  ].join(' \u00B7 ');
+}
+
+/**
+ * Looks a channel name up from the rendered picker rows.
+ *
+ * @param root - Element containing the wizard markup
+ * @returns A context resolving names and the channel the page is on
+ */
+function defaultSummaryContext(root: ParentNode): WizardSummaryContext {
+  let currentChannelId: string | null = null;
+  try {
+    currentChannelId = getChannelIdFromUrl();
+  } catch {
+    currentChannelId = null;
+  }
+  return {
+    currentChannelId,
+    channelName: (id) => channelNameFromDom(root, id),
+  };
+}
+
 /**
  * Copies the free-text inputs from the DOM into wizard state.
  *
@@ -201,7 +336,11 @@ export function readWizardInputs(state: WizardState, root: ParentNode): void {
 
 function setSelected(root: ParentNode, selector: string, attribute: string, value: string): void {
   for (const el of root.querySelectorAll(selector)) {
-    el.classList.toggle('selected', el.getAttribute(attribute) === value);
+    const on = el.getAttribute(attribute) === value;
+    el.classList.toggle('selected', on);
+    if (el.getAttribute('role') === 'radio') {
+      el.setAttribute('aria-checked', String(on));
+    }
   }
 }
 
@@ -210,8 +349,13 @@ function setSelected(root: ParentNode, selector: string, attribute: string, valu
  *
  * @param state - State to render
  * @param root - Element containing the wizard markup
+ * @param ctx - What the caller knows about channels, for the summary line
  */
-export function applyWizardState(state: WizardState, root: ParentNode): void {
+export function applyWizardState(
+  state: WizardState,
+  root: ParentNode,
+  ctx?: WizardSummaryContext,
+): void {
   setSelected(root, '[data-action="selectTarget"]', 'data-target', state.target);
   setSelected(root, '[data-action="selectTimeRange"]', 'data-timerange', state.timeRange);
 
@@ -241,6 +385,11 @@ export function applyWizardState(state: WizardState, root: ParentNode): void {
   toggleVisible(root, '[data-bind="manualIdContainer"]', state.target === 'specific');
   toggleVisible(root, '[data-bind="dateRangeContainer"]', state.timeRange === 'custom');
   toggleVisible(root, '[data-bind="deletionOrderGroup"]', SHOW_OLDEST_FIRST);
+
+  const summary = root.querySelector<HTMLElement>('[data-bind="wizardSummary"]');
+  if (summary) {
+    summary.textContent = describeWizardSummary(state, ctx ?? defaultSummaryContext(root));
+  }
 }
 
 function toggleVisible(root: ParentNode, selector: string, visible: boolean): void {
@@ -293,8 +442,13 @@ export function toggleFilter(state: WizardState, key: string): boolean | null {
  *
  * @param state - State to reset in place
  * @param root - Element containing the wizard markup
+ * @param ctx - What the caller knows about channels, for the summary line
  */
-export function resetWizardState(state: WizardState, root: ParentNode): void {
+export function resetWizardState(
+  state: WizardState,
+  root: ParentNode,
+  ctx?: WizardSummaryContext,
+): void {
   const fresh = createWizardState();
   state.stepIndex = fresh.stepIndex;
   state.target = fresh.target;
@@ -309,5 +463,5 @@ export function resetWizardState(state: WizardState, root: ParentNode): void {
   state.deletionOrder = fresh.deletionOrder;
   state.selectedChannels.clear();
   state.manualChannelId = fresh.manualChannelId;
-  applyWizardState(state, root);
+  applyWizardState(state, root, ctx);
 }

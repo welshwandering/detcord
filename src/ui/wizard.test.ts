@@ -3,6 +3,7 @@ import { createWindowHTML } from './window-markup';
 import {
   applyWizardState,
   createWizardState,
+  describeWizardSummary,
   isFilterOn,
   readWizardInputs,
   resetWizardState,
@@ -13,6 +14,7 @@ import {
   WIZARD_STEPS,
   type WizardState,
 } from './wizard';
+import { createWizardStepsHTML } from './wizard-markup';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -223,5 +225,178 @@ describe('wizard DOM binding', () => {
 
   it('exposes the four wizard steps in order', () => {
     expect([...WIZARD_STEPS]).toEqual(['location', 'timerange', 'filters', 'review']);
+  });
+
+  it('marks the selected row for assistive technology as well as the eye', () => {
+    state.timeRange = '30d';
+    applyWizardState(state, root);
+    const selected = root.querySelector('[data-timerange="30d"]');
+    const other = root.querySelector('[data-timerange="all"]');
+    expect(selected?.getAttribute('aria-checked')).toBe('true');
+    expect(other?.getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('writes the summary line whenever state is applied', () => {
+    state.target = 'server';
+    state.timeRange = '30d';
+    state.hasLink = true;
+    applyWizardState(state, root);
+    expect(root.querySelector('[data-bind="wizardSummary"]')?.textContent).toBe(
+      'every channel in this server \u00B7 last 30 days \u00B7 with links, pinned kept',
+    );
+  });
+
+  it('names a picked channel from the rows the picker rendered', () => {
+    const list = root.querySelector('[data-bind="channelList"]') as HTMLElement;
+    list.innerHTML =
+      '<div data-channel-id="111111111111111111">' +
+      '<span class="detcord-channel-name">general</span></div>';
+    state.target = 'specific';
+    state.selectedChannels.add('111111111111111111');
+    applyWizardState(state, root);
+    expect(root.querySelector('[data-bind="wizardSummary"]')?.textContent).toContain('#general');
+  });
+
+  it('clears the summary back to its defaults on reset', () => {
+    state.target = 'server';
+    state.hasFile = true;
+    applyWizardState(state, root);
+    resetWizardState(state, root);
+    expect(root.querySelector('[data-bind="wizardSummary"]')?.textContent).toBe(
+      'this channel \u00B7 all time \u00B7 pinned kept',
+    );
+  });
+});
+
+describe('describeWizardSummary', () => {
+  it('reads target, range and filters in one line', () => {
+    const state = createWizardState();
+    state.timeRange = '30d';
+    state.hasLink = true;
+    const summary = describeWizardSummary(state, {
+      currentChannelId: '111111111111111111',
+      channelName: () => 'current-channel',
+    });
+    expect(summary).toBe('#current-channel \u00B7 last 30 days \u00B7 with links, pinned kept');
+  });
+
+  it('falls back to the channel ID when no name is known', () => {
+    const state = createWizardState();
+    const summary = describeWizardSummary(state, { currentChannelId: '111111111111111111' });
+    expect(summary.startsWith('111111111111111111 \u00B7')).toBe(true);
+  });
+
+  it('says so when Detcord cannot see a channel at all', () => {
+    expect(describeWizardSummary(createWizardState())).toBe(
+      'this channel \u00B7 all time \u00B7 pinned kept',
+    );
+  });
+
+  it('counts a multi-channel selection and includes a manual ID', () => {
+    const state = createWizardState();
+    state.target = 'specific';
+    state.selectedChannels.add('111111111111111111');
+    state.manualChannelId = '222222222222222222';
+    expect(describeWizardSummary(state)).toContain('2 channels');
+  });
+
+  it('reports an empty specific selection rather than implying a target', () => {
+    const state = createWizardState();
+    state.target = 'specific';
+    expect(describeWizardSummary(state)).toContain('no channels picked');
+  });
+
+  it('names the DM and server scopes', () => {
+    const dm = createWizardState();
+    dm.target = 'dm';
+    expect(describeWizardSummary(dm)).toContain('this DM');
+    const server = createWizardState();
+    server.target = 'server';
+    expect(describeWizardSummary(server)).toContain('every channel in this server');
+  });
+
+  it('spells out a custom range from the dates entered', () => {
+    const state = createWizardState();
+    state.timeRange = 'custom';
+    expect(describeWizardSummary(state)).toContain('custom range');
+    state.customAfter = '2024-01-01';
+    expect(describeWizardSummary(state)).toContain('after 2024-01-01');
+    state.customBefore = '2024-02-01';
+    expect(describeWizardSummary(state)).toContain('2024-01-01 to 2024-02-01');
+    state.customAfter = '';
+    expect(describeWizardSummary(state)).toContain('before 2024-02-01');
+  });
+
+  it('quotes text filters and cuts long ones short', () => {
+    const state = createWizardState();
+    state.content = 'a'.repeat(40);
+    state.pattern = '^gg$';
+    const summary = describeWizardSummary(state);
+    expect(summary).toContain(`containing "${'a'.repeat(24)}\u2026"`);
+    expect(summary).toContain('matching /^gg$/');
+  });
+
+  it('states what happens to pinned messages either way', () => {
+    const state = createWizardState();
+    expect(describeWizardSummary(state)).toContain('pinned kept');
+    state.includePinned = true;
+    expect(describeWizardSummary(state)).toContain('pinned included');
+  });
+});
+
+describe('wizard markup', () => {
+  const html = createWizardStepsHTML();
+
+  it('titles the steps as statements', () => {
+    const titles = [...html.matchAll(/-step-title">([^<]+)</g)].map((match) => match[1]);
+    expect(titles).toEqual(['Target', 'Range', 'Filters', 'Review']);
+  });
+
+  it('carries no emoji', () => {
+    expect(html).not.toMatch(/\p{Extended_Pictographic}/u);
+  });
+
+  it('offers every target and range as a keyboard-operable row', () => {
+    const root = document.createElement('div');
+    root.innerHTML = html;
+    const rows = root.querySelectorAll('[data-action="selectTarget"], [data-timerange]');
+    expect(rows.length).toBe(11);
+    for (const row of rows) {
+      expect(row.tagName).toBe('BUTTON');
+      expect(row.querySelectorAll('span')).toHaveLength(2);
+    }
+  });
+
+  it('keeps every binding the controller drives', () => {
+    for (const binding of [
+      'wizardSummary',
+      'serverCard',
+      'dmCard',
+      'channelPicker',
+      'channelList',
+      'selectedChannelCount',
+      'manualIdContainer',
+      'locationError',
+      'dateRangeContainer',
+      'timeRangeError',
+      'deletionOrderGroup',
+      'patternError',
+      'reviewSummary',
+      'reviewCount',
+      'reviewCountLabel',
+      'reviewDetails',
+      'reviewRows',
+      'previewList',
+      'previewContent',
+      'reviewError',
+      'confirmButton',
+    ]) {
+      expect(html).toContain(`data-bind="${binding}"`);
+    }
+  });
+
+  it('says Continue rather than anything cuter', () => {
+    expect(html).toContain('Continue');
+    expect(html).not.toContain('Begin Sweep');
   });
 });

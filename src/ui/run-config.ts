@@ -74,8 +74,10 @@ export type RunConfigResult =
   | { readonly ok: true; readonly config: RunConfig }
   | { readonly ok: false; readonly error: string };
 
-/** One line of the review screen summary. */
+/** One line of the review screen receipt. */
 export interface SummaryLine {
+  /** Stable name, so callers can pick a line out without matching its label. */
+  readonly key: 'target' | 'range' | 'cutoff' | 'filters';
   readonly label: string;
   readonly value: string;
 }
@@ -272,24 +274,54 @@ export function describeTimeRange(config: RunConfig): string {
 }
 
 /**
- * Describes the target of a run, including the raw Discord IDs.
+ * Names the range the way the receipt reads it.
+ *
+ * The chosen preset says more than the instants it resolved to, so it wins
+ * whenever there is one; a hand-entered range has only its dates to give.
  *
  * @param config - The config to describe
+ * @returns Range wording for the receipt sentence
+ */
+export function describeRangePhrase(config: RunConfig): string {
+  if (!config.after && !config.before) {
+    return 'all time';
+  }
+  if (config.timeRangeLabel && config.timeRangeLabel !== 'Custom range') {
+    return config.timeRangeLabel;
+  }
+  return describeTimeRange(config);
+}
+
+/**
+ * Describes the target of a run.
+ *
+ * Run configs carry Discord IDs rather than names, so a channel is named when
+ * the caller knows its name and identified by ID when it does not.
+ *
+ * @param config - The config to describe
+ * @param channelName - Resolves a channel ID to its Discord name
  * @returns Human-readable target
  */
-export function describeTarget(config: RunConfig): string {
-  if (config.scope === 'server') {
-    return `Server ${config.guildId ?? '?'} (all channels)`;
-  }
-  if (config.scope === 'specific') {
-    const count = config.channelIds.length;
-    if (count === 1) {
-      return `Channel ${config.channelIds[0]}`;
+export function describeTarget(
+  config: RunConfig,
+  channelName?: (id: string) => string | undefined,
+): string {
+  const named = (id: string | undefined): string => {
+    if (!id) {
+      return 'unknown channel';
     }
-    return `${count} channels: ${config.channelIds.join(', ')}`;
+    const name = channelName?.(id)?.trim();
+    return name ? `#${name}` : id;
+  };
+
+  if (config.scope === 'server') {
+    return `Every channel in server ${config.guildId ?? 'unknown'}`;
+  }
+  if (config.scope === 'specific' && config.channelIds.length > 1) {
+    return `${config.channelIds.length} channels: ${config.channelIds.map(named).join(', ')}`;
   }
   const label = config.scope === 'dm' ? 'DM' : 'Channel';
-  return `${label} ${config.channelIds[0]}`;
+  return `${label} ${named(config.channelIds[0])}`;
 }
 
 /**
@@ -313,32 +345,38 @@ export function newestBoundary(config: RunConfig): Date {
  * Builds the label/value pairs shown on the review screen.
  *
  * @param config - The config to describe
+ * @param channelName - Resolves a channel ID to its Discord name
  * @returns One entry per summary line
  */
-export function describeRunConfig(config: RunConfig): SummaryLine[] {
-  const lines: SummaryLine[] = [
-    { label: 'Target', value: describeTarget(config) },
-    { label: 'Time range', value: `${config.timeRangeLabel} - ${describeTimeRange(config)}` },
-    { label: 'Cutoff', value: `Messages up to ${formatLocal(newestBoundary(config))}` },
-  ];
-
+export function describeRunConfig(
+  config: RunConfig,
+  channelName?: (id: string) => string | undefined,
+): SummaryLine[] {
   const filters: string[] = [];
   if (config.content) {
-    filters.push(`contains "${config.content}"`);
+    filters.push(`containing "${config.content}"`);
   }
   if (config.pattern) {
-    filters.push(`matches /${config.pattern}/i`);
+    filters.push(`matching /${config.pattern}/i`);
   }
   if (config.hasLink) {
-    filters.push('has a link');
+    filters.push('with links');
   }
   if (config.hasFile) {
-    filters.push('has an attachment');
+    filters.push('with attachments');
   }
-  filters.push(config.includePinned ? 'includes pinned' : 'skips pinned');
-  lines.push({ label: 'Filters', value: filters.join(', ') });
+  filters.push(config.includePinned ? 'pinned included' : 'pinned kept');
 
-  return lines;
+  return [
+    { key: 'target', label: 'Target', value: describeTarget(config, channelName) },
+    {
+      key: 'range',
+      label: 'Range',
+      value: `${config.timeRangeLabel} \u00B7 ${describeTimeRange(config)}`,
+    },
+    { key: 'cutoff', label: 'Messages up to', value: formatLocal(newestBoundary(config)) },
+    { key: 'filters', label: 'Filters', value: filters.join(', ') },
+  ];
 }
 
 /**

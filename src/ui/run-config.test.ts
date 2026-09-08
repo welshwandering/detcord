@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { dateToSnowflake, snowflakeToDate } from '../utils/helpers';
 import {
   buildRunConfig,
+  describeRangePhrase,
   describeRunConfig,
   describeTarget,
   describeTimeRange,
@@ -189,22 +190,39 @@ describe('describeRunConfig', () => {
     expect(lines[1]?.value).toContain(after.toLocaleDateString());
   });
 
-  it('lists the filters that are on', () => {
+  it('names every line, so callers need not match on labels', () => {
+    const config = unwrap(buildRunConfig(input()));
+    expect(describeRunConfig(config).map((line) => line.key)).toEqual([
+      'target',
+      'range',
+      'cutoff',
+      'filters',
+    ]);
+  });
+
+  it('lists the filters that are on, in receipt wording', () => {
     const config = unwrap(
       buildRunConfig(input({ hasLink: true, includePinned: true, content: 'hello' })),
     );
     const filters = describeRunConfig(config)[3]?.value ?? '';
-    expect(filters).toContain('has a link');
-    expect(filters).toContain('includes pinned');
+    expect(filters).toContain('with links');
+    expect(filters).toContain('pinned included');
     expect(filters).toContain('"hello"');
   });
 
-  it('shows the upper bound the run was given', () => {
+  it('says pinned messages are kept when they are not included', () => {
+    const config = unwrap(buildRunConfig(input({ hasFile: true })));
+    const filters = describeRunConfig(config)[3]?.value ?? '';
+    expect(filters).toBe('with attachments, pinned kept');
+  });
+
+  it('labels the upper bound and leaves the value to the date alone', () => {
     const captured = new Date(2024, 4, 6, 7, 8);
     const config = unwrap(buildRunConfig(input({ newestAllowed: captured })));
     const cutoff = describeRunConfig(config)[2];
-    expect(cutoff?.value).toContain('Messages up to');
+    expect(cutoff?.label).toBe('Messages up to');
     expect(cutoff?.value).toContain(captured.toLocaleDateString());
+    expect(cutoff?.value).not.toContain('Messages up to');
   });
 
   it('describes multi-channel and server targets', () => {
@@ -214,6 +232,27 @@ describe('describeRunConfig', () => {
     expect(describeTarget(multi)).toContain('2 channels');
     const server = unwrap(buildRunConfig(input({ scope: 'server' })));
     expect(describeTarget(server)).toContain(GUILD);
+    expect(describeTarget(server)).toMatch(/^Every channel in server /);
+  });
+
+  it('names a channel when the caller knows its name', () => {
+    const config = unwrap(buildRunConfig(input()));
+    expect(describeTarget(config)).toBe(`Channel ${CHANNEL_A}`);
+    expect(describeTarget(config, () => 'general')).toBe('Channel #general');
+    expect(describeTarget(config, () => '  ')).toBe(`Channel ${CHANNEL_A}`);
+  });
+
+  it('names every channel of a multi-channel target it can', () => {
+    const multi = unwrap(
+      buildRunConfig(input({ scope: 'specific', selectedChannelIds: [CHANNEL_A, CHANNEL_B] })),
+    );
+    const named = describeTarget(multi, (id) => (id === CHANNEL_A ? 'general' : undefined));
+    expect(named).toBe(`2 channels: #general, ${CHANNEL_B}`);
+  });
+
+  it('calls a DM a DM', () => {
+    const dm = unwrap(buildRunConfig(input({ scope: 'dm' })));
+    expect(describeTarget(dm)).toBe(`DM ${CHANNEL_A}`);
   });
 
   it('describes the all-time and before-only ranges', () => {
@@ -221,6 +260,26 @@ describe('describeRunConfig', () => {
     expect(describeTimeRange(all)).toBe('All time');
     const before = unwrap(buildRunConfig(input({ before: new Date(2024, 5, 1) })));
     expect(describeTimeRange(before)).toMatch(/^Before /);
+  });
+});
+
+describe('describeRangePhrase', () => {
+  it('reads as "all time" when nothing bounds the run', () => {
+    expect(describeRangePhrase(unwrap(buildRunConfig(input())))).toBe('all time');
+  });
+
+  it('prefers the chosen preset over the instants it resolved to', () => {
+    const config = unwrap(
+      buildRunConfig(input({ after: new Date(2024, 0, 2), timeRangeLabel: 'Last 24 hours' })),
+    );
+    expect(describeRangePhrase(config)).toBe('Last 24 hours');
+  });
+
+  it('falls back to the dates for a hand-entered range', () => {
+    const config = unwrap(
+      buildRunConfig(input({ after: new Date(2024, 0, 2, 3, 4), timeRangeLabel: 'Custom range' })),
+    );
+    expect(describeRangePhrase(config)).toMatch(/^After /);
   });
 });
 
